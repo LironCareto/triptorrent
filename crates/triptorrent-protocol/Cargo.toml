@@ -1,0 +1,13 @@
+[package]
+name = "triptorrent-protocol"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire-protocol primitives for the TripTorrent reference implementation"
+
+[dependencies]
+triptorrent-core = { path = "../triptorrent-core" }
+
+[lints]
+workspace = true
