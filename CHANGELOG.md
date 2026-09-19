@@ -10,3 +10,4 @@ All notable project changes will be documented here.
 - Manual validation record for the first successful TripTorrent transfer on 2026-09-19.
 - M2 temporary bootstrap overlay with leased discovery, automatic relay selection, failover and multi-node simulation.
 - M3 decentralized-discovery research, adversarial simulation, metadata analysis, RFC and ADR selecting a separated multi-stage prototype direction.
+- M4 concurrent swarm transfer with multiple providers, compact piece availability, rarest-first scheduling, transfer-local failover penalties, verified resume state, bandwidth limits and process-level adversarial acceptance tests.

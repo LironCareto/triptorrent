@@ -64,6 +64,12 @@ Local and transit observers can correlate discovery and transfer timing. A collu
 
 The deterministic M3 model found that three diverse lookup paths improved availability under its malicious-node and concentrated-Sybil scenarios, but increased control traffic and the number of nodes seeing the derived key. These comparative results are not an Internet-scale security estimate. See [M3 Discovery Research](M3_DISCOVERY_RESEARCH.md) for assumptions, matrices and measurements.
 
+## M4 swarm security and metadata
+
+M4 verifies each received chunk against one agreed manifest and verifies the completed bytes against the requested content ID. Corrupt data, wrong indices, false availability and mid-transfer disconnects disable that provider only for the current transfer; another source may retry the chunk. Resume metadata is bound to the exact manifest, and every recorded completed chunk is revalidated from disk after restart. These checks protect integrity but do not prove that a provider is available, prevent resource exhaustion or create durable reputation.
+
+Using several sources broadens metadata exposure. The M2 bootstrap sees the full provider set and every route assignment. Each selected relay sees the endpoint pair, route, timing, frame sizes and duration for its session. Providers learn the requested content and requested chunk indices; availability bitfields reveal which pieces each provider holds to the receiver. Noise continues to hide application plaintext from a non-colluding relay, but traffic volume and piece-sized timing remain observable. M4 introduces no new anonymity claim and does not implement the M3 discovery architecture.
+
 ## Security rule
 
 No protocol component should make an anonymity claim stronger than what the threat model and implementation can support.

@@ -18,6 +18,9 @@ const TEST_POLL_INTERVAL_MS: &str = "1";
 const TEST_IDLE_MARKER_ENV: &str = "TRIPTORRENT_TEST_IDLE_MARKER_AFTER";
 const TEST_IDLE_MARKER_AFTER: &str = "601";
 const TEST_IDLE_MARKER: &str = "TRIPTORRENT_TEST_IDLE_POLLS_REACHED=601";
+const TEST_CORRUPT_CHUNKS_ENV: &str = "TRIPTORRENT_TEST_CORRUPT_CHUNKS";
+const TEST_CHUNK_DELAY_ENV: &str = "TRIPTORRENT_TEST_CHUNK_DELAY_MS";
+const PROVIDER_READY_MARKER: &str = "TRIPTORRENT_PROVIDER_READY";
 
 static E2E_LOCK: Mutex<()> = Mutex::new(());
 
@@ -118,12 +121,18 @@ impl ManagedChild {
     }
 
     fn wait_for_stderr(&mut self, expected: &str, timeout: Duration) {
+        self.wait_for_stderr_count(expected, 1, timeout);
+    }
+
+    fn wait_for_stderr_count(&mut self, expected: &str, count: usize, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
             self.assert_running();
             if fs::read_to_string(&self.stderr_path)
                 .unwrap_or_default()
-                .contains(expected)
+                .matches(expected)
+                .count()
+                >= count
             {
                 return;
             }
@@ -181,7 +190,9 @@ fn binary_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_triptorrent"));
     command
         .env_remove(TEST_POLL_INTERVAL_ENV)
-        .env_remove(TEST_IDLE_MARKER_ENV);
+        .env_remove(TEST_IDLE_MARKER_ENV)
+        .env_remove(TEST_CORRUPT_CHUNKS_ENV)
+        .env_remove(TEST_CHUNK_DELAY_ENV);
     command
 }
 
@@ -221,13 +232,21 @@ fn wait_for_startup(process: &mut ManagedChild) {
 }
 
 fn start_bootstrap(log_directory: &Path, address: SocketAddr) -> ManagedChild {
+    start_bootstrap_with_lease(log_directory, address, 30_000)
+}
+
+fn start_bootstrap_with_lease(
+    log_directory: &Path,
+    address: SocketAddr,
+    lease_ms: u64,
+) -> ManagedChild {
     let mut command = binary_command();
     command.args([
         "bootstrap",
         "--listen",
         &address.to_string(),
         "--lease-ms",
-        "30000",
+        &lease_ms.to_string(),
     ]);
     let mut process = ManagedChild::spawn("bootstrap", command, log_directory);
     wait_for_listener(&mut process, address);
@@ -262,6 +281,26 @@ fn start_share(
     source: &Path,
     fast_poll: bool,
 ) -> ManagedChild {
+    start_share_with_options(
+        log_directory,
+        label,
+        bootstrap,
+        source,
+        fast_poll,
+        None,
+        None,
+    )
+}
+
+fn start_share_with_options(
+    log_directory: &Path,
+    label: &str,
+    bootstrap: SocketAddr,
+    source: &Path,
+    fast_poll: bool,
+    availability: Option<&str>,
+    test_environment: Option<(&str, &str)>,
+) -> ManagedChild {
     let mut command = binary_command();
     command
         .arg("share")
@@ -269,12 +308,22 @@ fn start_share(
         .arg(bootstrap.to_string())
         .arg("--file")
         .arg(source);
+    if let Some(availability) = availability {
+        command.arg("--available").arg(availability);
+    }
     if fast_poll {
         command
             .env(TEST_POLL_INTERVAL_ENV, TEST_POLL_INTERVAL_MS)
             .env(TEST_IDLE_MARKER_ENV, TEST_IDLE_MARKER_AFTER);
     }
+    if let Some((name, value)) = test_environment {
+        command.env(name, value);
+    }
     ManagedChild::spawn(label, command, log_directory)
+}
+
+fn wait_for_provider(process: &mut ManagedChild) {
+    process.wait_for_stderr(PROVIDER_READY_MARKER, READY_TIMEOUT);
 }
 
 fn start_fetch(
@@ -317,6 +366,76 @@ fn write_source(path: &Path, seed: u8) -> Vec<u8> {
     }
     fs::write(path, &bytes).expect("write deterministic source file");
     bytes
+}
+
+fn write_large_source(path: &Path, seed: u8, chunks: usize) -> Vec<u8> {
+    let length = chunks * 32 * 1024 - 113;
+    let bytes: Vec<_> = (0..length)
+        .map(|index| index.to_le_bytes()[0].wrapping_mul(31) ^ seed)
+        .collect();
+    fs::write(path, &bytes).expect("write deterministic large source file");
+    bytes
+}
+
+fn positive_provider_count(stderr: &str) -> usize {
+    let stats = stderr
+        .lines()
+        .find(|line| line.starts_with("TRIPTORRENT_SWARM_STATS"))
+        .expect("fetch emitted swarm statistics");
+    let accepted = stats
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("accepted="))
+        .expect("statistics include accepted counts");
+    accepted
+        .split(',')
+        .filter(|entry| {
+            entry
+                .rsplit_once(':')
+                .and_then(|(_, count)| count.parse::<usize>().ok())
+                .is_some_and(|count| count > 0)
+        })
+        .count()
+}
+
+fn stat_value(stderr: &str, name: &str) -> usize {
+    let prefix = format!("{name}=");
+    stderr
+        .lines()
+        .find(|line| line.starts_with("TRIPTORRENT_SWARM_STATS"))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix(&prefix))
+        })
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("swarm statistics omitted {name}"))
+}
+
+fn start_ready_provider_pair(
+    directory: &Path,
+    bootstrap: SocketAddr,
+    source: &Path,
+    label_prefix: &str,
+    delay_ms: Option<&str>,
+) -> Vec<ManagedChild> {
+    let environment = delay_ms.map(|value| (TEST_CHUNK_DELAY_ENV, value));
+    let mut providers: Vec<_> = ["a", "b"]
+        .into_iter()
+        .map(|suffix| {
+            start_share_with_options(
+                directory,
+                &format!("{label_prefix}-{suffix}"),
+                bootstrap,
+                source,
+                false,
+                None,
+                environment,
+            )
+        })
+        .collect();
+    for provider in &mut providers {
+        wait_for_provider(provider);
+    }
+    providers
 }
 
 fn assert_transfer(
@@ -544,6 +663,404 @@ fn cli_simultaneous_transfers_use_independent_routes() {
     assert!(share_output_b.stdout.contains("transfer complete"));
     assert_eq!(fs::read(destination_a).expect("read output A"), expected_a);
     assert_eq!(fs::read(destination_b).expect("read output B"), expected_b);
+    relay_b.assert_running();
+    relay_a.assert_running();
+    bootstrap.assert_running();
+}
+
+#[test]
+fn cli_swarm_uses_multiple_providers() {
+    let _guard = e2e_guard();
+    let directory = tempdir().expect("create test directory");
+    let addresses = free_addresses(3);
+    let bootstrap_address = addresses[0];
+    let mut bootstrap = start_bootstrap(directory.path(), bootstrap_address);
+    let mut relay_a = start_relay(
+        directory.path(),
+        "swarm-relay-a",
+        addresses[1],
+        bootstrap_address,
+        "relay-a",
+    );
+    let mut relay_b = start_relay(
+        directory.path(),
+        "swarm-relay-b",
+        addresses[2],
+        bootstrap_address,
+        "relay-b",
+    );
+    let source = directory.path().join("swarm-source.bin");
+    let destination = directory.path().join("swarm-output.bin");
+    let expected = write_large_source(&source, 0x31, 18);
+    let content_id = identify(directory.path(), "swarm-identify", &source, &expected);
+    let mut shares: Vec<_> = (0..3)
+        .map(|index| {
+            start_share(
+                directory.path(),
+                &format!("swarm-provider-{index}"),
+                bootstrap_address,
+                &source,
+                false,
+            )
+        })
+        .collect();
+    for share in &mut shares {
+        wait_for_provider(share);
+    }
+
+    let fetch = start_fetch(
+        directory.path(),
+        "swarm-fetch",
+        bootstrap_address,
+        &content_id,
+        &destination,
+    );
+    let fetch_output = fetch.wait_success(TRANSFER_TIMEOUT);
+    assert!(
+        positive_provider_count(&fetch_output.stderr) >= 2,
+        "fewer than two providers contributed\n{}",
+        fetch_output.diagnostics("swarm-fetch")
+    );
+    for share in shares {
+        share.wait_success(TRANSFER_TIMEOUT);
+    }
+    let actual = fs::read(destination).expect("read swarm output");
+    assert_eq!(actual, expected);
+    assert_eq!(ContentId::digest(&actual).to_string(), content_id);
+    assert!(fetch_output.stdout.contains(&content_id));
+    relay_b.assert_running();
+    relay_a.assert_running();
+    bootstrap.assert_running();
+}
+
+#[test]
+fn cli_swarm_combines_partial_availability() {
+    let _guard = e2e_guard();
+    let directory = tempdir().expect("create test directory");
+    let addresses = free_addresses(3);
+    let bootstrap_address = addresses[0];
+    let mut bootstrap = start_bootstrap(directory.path(), bootstrap_address);
+    let mut relay_a = start_relay(
+        directory.path(),
+        "partial-relay-a",
+        addresses[1],
+        bootstrap_address,
+        "relay-a",
+    );
+    let mut relay_b = start_relay(
+        directory.path(),
+        "partial-relay-b",
+        addresses[2],
+        bootstrap_address,
+        "relay-b",
+    );
+    let source = directory.path().join("partial-source.bin");
+    let destination = directory.path().join("partial-output.bin");
+    let expected = write_large_source(&source, 0x52, 12);
+    let content_id = identify(directory.path(), "partial-identify", &source, &expected);
+    let mut shares = vec![
+        start_share_with_options(
+            directory.path(),
+            "partial-provider-a",
+            bootstrap_address,
+            &source,
+            false,
+            Some("0-5"),
+            None,
+        ),
+        start_share_with_options(
+            directory.path(),
+            "partial-provider-b",
+            bootstrap_address,
+            &source,
+            false,
+            Some("4-11"),
+            None,
+        ),
+        start_share_with_options(
+            directory.path(),
+            "partial-provider-c",
+            bootstrap_address,
+            &source,
+            false,
+            Some("2-3,8-9"),
+            None,
+        ),
+    ];
+    for share in &mut shares {
+        wait_for_provider(share);
+    }
+    let fetch = start_fetch(
+        directory.path(),
+        "partial-fetch",
+        bootstrap_address,
+        &content_id,
+        &destination,
+    );
+    let fetch_output = fetch.wait_success(TRANSFER_TIMEOUT);
+    assert!(positive_provider_count(&fetch_output.stderr) >= 2);
+    for share in shares {
+        share.wait_success(TRANSFER_TIMEOUT);
+    }
+    assert_eq!(
+        fs::read(destination).expect("read partial output"),
+        expected
+    );
+    relay_b.assert_running();
+    relay_a.assert_running();
+    bootstrap.assert_running();
+}
+
+#[test]
+fn cli_swarm_reassigns_after_provider_failure() {
+    let _guard = e2e_guard();
+    let directory = tempdir().expect("create test directory");
+    let addresses = free_addresses(3);
+    let bootstrap_address = addresses[0];
+    let mut bootstrap = start_bootstrap(directory.path(), bootstrap_address);
+    let mut relay_a = start_relay(
+        directory.path(),
+        "failure-relay-a",
+        addresses[1],
+        bootstrap_address,
+        "relay-a",
+    );
+    let mut relay_b = start_relay(
+        directory.path(),
+        "failure-relay-b",
+        addresses[2],
+        bootstrap_address,
+        "relay-b",
+    );
+    let source = directory.path().join("failure-source.bin");
+    let destination = directory.path().join("failure-output.bin");
+    let expected = write_large_source(&source, 0x73, 40);
+    let content_id = identify(directory.path(), "failure-identify", &source, &expected);
+    let mut failed = start_share_with_options(
+        directory.path(),
+        "failure-provider-a",
+        bootstrap_address,
+        &source,
+        false,
+        None,
+        Some((TEST_CHUNK_DELAY_ENV, "100")),
+    );
+    let mut survivor_a = start_share_with_options(
+        directory.path(),
+        "failure-provider-b",
+        bootstrap_address,
+        &source,
+        false,
+        None,
+        Some((TEST_CHUNK_DELAY_ENV, "20")),
+    );
+    let mut survivor_b = start_share_with_options(
+        directory.path(),
+        "failure-provider-c",
+        bootstrap_address,
+        &source,
+        false,
+        None,
+        Some((TEST_CHUNK_DELAY_ENV, "20")),
+    );
+    wait_for_provider(&mut failed);
+    wait_for_provider(&mut survivor_a);
+    wait_for_provider(&mut survivor_b);
+    let fetch = start_fetch(
+        directory.path(),
+        "failure-fetch",
+        bootstrap_address,
+        &content_id,
+        &destination,
+    );
+    failed.wait_for_stderr_count("TRIPTORRENT_CHUNK_REQUESTED", 2, TRANSFER_TIMEOUT);
+    let _ = failed.terminate();
+    let fetch_output = fetch.wait_success(TRANSFER_TIMEOUT);
+    assert!(
+        stat_value(&fetch_output.stderr, "retries") >= 1,
+        "provider failure did not reassign a chunk\n{}",
+        fetch_output.diagnostics("failure-fetch")
+    );
+    survivor_a.wait_success(TRANSFER_TIMEOUT);
+    survivor_b.wait_success(TRANSFER_TIMEOUT);
+    assert_eq!(
+        fs::read(destination).expect("read failure output"),
+        expected
+    );
+    relay_b.assert_running();
+    relay_a.assert_running();
+    bootstrap.assert_running();
+}
+
+#[test]
+fn cli_swarm_rejects_a_malicious_chunk() {
+    let _guard = e2e_guard();
+    let directory = tempdir().expect("create test directory");
+    let addresses = free_addresses(3);
+    let bootstrap_address = addresses[0];
+    let mut bootstrap = start_bootstrap(directory.path(), bootstrap_address);
+    let mut relay_a = start_relay(
+        directory.path(),
+        "malicious-relay-a",
+        addresses[1],
+        bootstrap_address,
+        "relay-a",
+    );
+    let mut relay_b = start_relay(
+        directory.path(),
+        "malicious-relay-b",
+        addresses[2],
+        bootstrap_address,
+        "relay-b",
+    );
+    let source = directory.path().join("malicious-source.bin");
+    let destination = directory.path().join("malicious-output.bin");
+    let expected = write_large_source(&source, 0x94, 16);
+    let content_id = identify(directory.path(), "malicious-identify", &source, &expected);
+    let mut malicious = start_share_with_options(
+        directory.path(),
+        "malicious-provider",
+        bootstrap_address,
+        &source,
+        false,
+        None,
+        Some((TEST_CORRUPT_CHUNKS_ENV, "0,1,2")),
+    );
+    let mut honest_a = start_share(
+        directory.path(),
+        "honest-provider-a",
+        bootstrap_address,
+        &source,
+        false,
+    );
+    let mut honest_b = start_share(
+        directory.path(),
+        "honest-provider-b",
+        bootstrap_address,
+        &source,
+        false,
+    );
+    wait_for_provider(&mut malicious);
+    wait_for_provider(&mut honest_a);
+    wait_for_provider(&mut honest_b);
+    let fetch = start_fetch(
+        directory.path(),
+        "malicious-fetch",
+        bootstrap_address,
+        &content_id,
+        &destination,
+    );
+    let fetch_output = fetch.wait_success(TRANSFER_TIMEOUT);
+    assert!(stat_value(&fetch_output.stderr, "retries") >= 1);
+    malicious.wait_success(TRANSFER_TIMEOUT);
+    honest_a.wait_success(TRANSFER_TIMEOUT);
+    honest_b.wait_success(TRANSFER_TIMEOUT);
+    assert_eq!(
+        fs::read(destination).expect("read malicious output"),
+        expected
+    );
+    relay_b.assert_running();
+    relay_a.assert_running();
+    bootstrap.assert_running();
+}
+
+#[test]
+fn cli_swarm_resumes_verified_chunks_after_restart() {
+    let _guard = e2e_guard();
+    let directory = tempdir().expect("create test directory");
+    let addresses = free_addresses(3);
+    let bootstrap_address = addresses[0];
+    let mut bootstrap = start_bootstrap_with_lease(directory.path(), bootstrap_address, 800);
+    let mut relay_a = start_relay(
+        directory.path(),
+        "resume-relay-a",
+        addresses[1],
+        bootstrap_address,
+        "relay-a",
+    );
+    let mut relay_b = start_relay(
+        directory.path(),
+        "resume-relay-b",
+        addresses[2],
+        bootstrap_address,
+        "relay-b",
+    );
+    let source = directory.path().join("resume-source.bin");
+    let destination = directory.path().join("resume-output.bin");
+    let expected = write_large_source(&source, 0xb5, 48);
+    let content_id = identify(directory.path(), "resume-identify", &source, &expected);
+    let mut first_providers = start_ready_provider_pair(
+        directory.path(),
+        bootstrap_address,
+        &source,
+        "resume-first",
+        Some("50"),
+    );
+    let mut first_fetch = start_fetch(
+        directory.path(),
+        "resume-first-fetch",
+        bootstrap_address,
+        &content_id,
+        &destination,
+    );
+    first_fetch.wait_for_stderr_count("TRIPTORRENT_CHUNK_ACCEPTED", 6, TRANSFER_TIMEOUT);
+    let _ = first_fetch.terminate();
+    for provider in &mut first_providers {
+        let _ = provider.terminate();
+    }
+    assert!(
+        directory
+            .path()
+            .join("resume-output.bin.triptorrent-part")
+            .exists()
+    );
+    assert!(
+        directory
+            .path()
+            .join("resume-output.bin.triptorrent-state")
+            .exists()
+    );
+
+    thread::sleep(Duration::from_millis(900));
+    let second_providers = start_ready_provider_pair(
+        directory.path(),
+        bootstrap_address,
+        &source,
+        "resume-second",
+        None,
+    );
+    let second_fetch = start_fetch(
+        directory.path(),
+        "resume-second-fetch",
+        bootstrap_address,
+        &content_id,
+        &destination,
+    );
+    let fetch_output = second_fetch.wait_success(TRANSFER_TIMEOUT);
+    assert!(
+        stat_value(&fetch_output.stderr, "resumed") >= 6,
+        "restart did not reuse verified chunks\n{}",
+        fetch_output.diagnostics("resume-second-fetch")
+    );
+    for provider in second_providers {
+        provider.wait_success(TRANSFER_TIMEOUT);
+    }
+    assert_eq!(
+        fs::read(&destination).expect("read resumed output"),
+        expected
+    );
+    assert!(
+        !directory
+            .path()
+            .join("resume-output.bin.triptorrent-part")
+            .exists()
+    );
+    assert!(
+        !directory
+            .path()
+            .join("resume-output.bin.triptorrent-state")
+            .exists()
+    );
     relay_b.assert_running();
     relay_a.assert_running();
     bootstrap.assert_running();

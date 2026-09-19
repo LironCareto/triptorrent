@@ -792,12 +792,15 @@ dependencies = [
  "anyhow",
  "clap",
  "hex",
+ "postcard",
+ "serde",
  "tempfile",
  "triptorrent-core",
  "triptorrent-net",
  "triptorrent-overlay",
  "triptorrent-protocol",
  "triptorrent-relay",
+ "triptorrent-swarm",
 ]
 
 [[package]]
@@ -842,6 +845,14 @@ dependencies = [
 [[package]]
 name = "triptorrent-relay"
 version = "0.0.0"
+
+[[package]]
+name = "triptorrent-swarm"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "triptorrent-protocol",
+]
 
 [[package]]
 name = "typenum"

@@ -10,11 +10,14 @@ description = "Local command-line demo for the TripTorrent M1 prototype"
 anyhow.workspace = true
 clap.workspace = true
 hex.workspace = true
+postcard.workspace = true
+serde.workspace = true
 triptorrent-core = { path = "../triptorrent-core" }
 triptorrent-net = { path = "../triptorrent-net" }
 triptorrent-overlay = { path = "../triptorrent-overlay" }
 triptorrent-protocol = { path = "../triptorrent-protocol" }
 triptorrent-relay = { path = "../triptorrent-relay" }
+triptorrent-swarm = { path = "../triptorrent-swarm" }
 
 [dev-dependencies]
 tempfile.workspace = true

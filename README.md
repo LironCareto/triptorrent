@@ -16,9 +16,9 @@ There is no stable wire protocol yet and there are currently **no security or an
 
 ## Current prototype
 
-M3 research is complete and recommends that the next prototype test capability-keyed Kademlia records, oblivious relay/gateway lookup paths, diverse replication and separate rendezvous coordination. The [research report](docs/M3_DISCOVERY_RESEARCH.md), [RFC 0002](rfcs/0002-separated-multi-stage-discovery.md) and [ADR 0004](docs/adr/0004-m3-separated-discovery-research.md) state the assumptions and limits. M3 does not implement a production DHT or establish an anonymity guarantee.
+M4 swarm transfer is implemented. A receiver discovers several providers through the temporary M2 bootstrap, opens an independent encrypted relay session to each, schedules verified 32 KiB chunks concurrently, retries failed or corrupt work, and resumes from validated local partial state. [RFC 0003](rfcs/0003-m4-swarm-transfer.md) and [ADR 0005](docs/adr/0005-m4-swarm-transfer.md) describe the experimental design.
 
-The current executable remains M2. It extends the encrypted M1 transfer into a local multi-node overlay. Peers advertise experimental content IDs under short leases, relays advertise availability, and a temporary bootstrap selects a provider and relay and creates an automatic route. The receiver needs only the bootstrap address and content ID; peers still connect exclusively through a relay.
+The current executable retains M2 discovery as scaffolding rather than implementing the M3 DHT/OHTTP research architecture. Peers advertise experimental content IDs under short leases, and the bootstrap now returns routes to several providers. The receiver needs only the bootstrap address and content ID; every provider/receiver session still travels exclusively through a relay.
 
 The bootstrap is a prototype rendezvous service, not the final decentralized discovery design. It observes peer IP addresses, ephemeral peer IDs and public keys, content advertisements and queries, relay endpoints, selected routes, timing and churn. It can substitute advertised keys because M2 has no durable identity or authenticated bootstrap protocol. M2 therefore provides no anonymity guarantee and must not be used for privacy-sensitive transfers.
 
@@ -38,13 +38,19 @@ cargo run -p triptorrent-cli -- share --bootstrap 127.0.0.1:7100 --file ./source
 cargo run -p triptorrent-cli -- fetch --bootstrap 127.0.0.1:7100 --content <CONTENT_ID> --output ./received.bin
 ```
 
-The content-ID format, chunking, overlay messages, leases, ephemeral identities, bootstrap, selection policy and Noise pattern remain experimental. M2 does not implement a DHT, multi-hop routing, traffic-analysis resistance, BitTorrent compatibility, NAT traversal or production hardening. M3 adds only deterministic no-I/O discovery research tooling:
+Run the same `share` command on several peers to form a swarm. Providers can expose an inclusive subset such as `--available 0-7,12-15`; `--upload-limit` and receiver `--download-limit` accept bytes per second, with zero or omission meaning unlimited. Interrupted downloads retain `<output>.triptorrent-part` and `<output>.triptorrent-state`; a later identical fetch validates and reuses completed chunks, then removes the state after final content-ID verification.
+
+The content-ID format, chunking, swarm messages, leases, ephemeral identities, bootstrap, selection policy and Noise pattern remain experimental. M4 does not add anonymity, a DHT, multi-hop routing, traffic-analysis resistance, BitTorrent compatibility, NAT traversal or production hardening. M3 remains deterministic no-I/O discovery research tooling:
 
 ```bash
 cargo run -p triptorrent-overlay --example m3_discovery_simulation
 ```
 
 Manual M1 `--relay`, `--route` and `--key` commands remain available for regression testing.
+
+## Testing
+
+`cargo test --workspace` is the complete milestone validation, including real CLI child-process tests for multi-source transfer, partial availability, provider failure, malicious chunks, resume and simultaneous swarms. Manual multi-terminal demos are optional debugging tools rather than acceptance requirements.
 
 ## Compatibility with the BitTorrent ecosystem
 

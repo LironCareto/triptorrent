@@ -26,6 +26,93 @@ pub enum Message {
     Complete,
     /// Explain why the request could not be served.
     Error(String),
+    /// Begin an experimental M4 piece-scheduled session.
+    SwarmRequest { content_id: ContentId },
+    /// Return the authoritative manifest and this provider's piece availability.
+    SwarmManifest {
+        manifest: Manifest,
+        availability: PieceAvailability,
+    },
+    /// Request one chunk by its manifest index.
+    ChunkRequest { index: u32 },
+    /// Report that a requested chunk is not available from this provider.
+    ChunkUnavailable { index: u32 },
+    /// End an M4 provider session after all needed requests have completed.
+    SwarmComplete,
+}
+
+/// Compact bitfield describing the chunks a provider can serve.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PieceAvailability {
+    /// Number of meaningful bits in `bits`.
+    pub chunk_count: u32,
+    /// Least-significant-bit-first bitfield; bit `n` represents chunk `n`.
+    pub bits: Vec<u8>,
+}
+
+impl PieceAvailability {
+    /// Builds a bitfield containing every chunk.
+    #[must_use]
+    pub fn all(chunk_count: u32) -> Self {
+        let byte_count = usize::try_from(chunk_count.div_ceil(8)).unwrap_or(usize::MAX);
+        let mut value = Self {
+            chunk_count,
+            bits: vec![0xff; byte_count],
+        };
+        value.clear_unused_bits();
+        value
+    }
+
+    /// Builds a bitfield from explicitly available indices.
+    #[must_use]
+    pub fn from_indices(chunk_count: u32, indices: impl IntoIterator<Item = u32>) -> Self {
+        let byte_count = usize::try_from(chunk_count.div_ceil(8)).unwrap_or(usize::MAX);
+        let mut value = Self {
+            chunk_count,
+            bits: vec![0; byte_count],
+        };
+        for index in indices {
+            if index < chunk_count {
+                let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
+                value.bits[byte] |= 1 << (index % 8);
+            }
+        }
+        value
+    }
+
+    /// Returns whether this well-formed bitfield contains `index`.
+    #[must_use]
+    pub fn contains(&self, index: u32) -> bool {
+        if !self.is_valid() || index >= self.chunk_count {
+            return false;
+        }
+        let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
+        self.bits[byte] & (1 << (index % 8)) != 0
+    }
+
+    /// Checks length and zero padding in the last byte.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let expected = usize::try_from(self.chunk_count.div_ceil(8)).unwrap_or(usize::MAX);
+        if self.bits.len() != expected {
+            return false;
+        }
+        let remainder = self.chunk_count % 8;
+        remainder == 0
+            || self
+                .bits
+                .last()
+                .is_none_or(|last| last & !((1_u8 << remainder) - 1) == 0)
+    }
+
+    fn clear_unused_bits(&mut self) {
+        let remainder = self.chunk_count % 8;
+        if remainder != 0
+            && let Some(last) = self.bits.last_mut()
+        {
+            *last &= (1_u8 << remainder) - 1;
+        }
+    }
 }
 
 /// A peer advertisement held under a temporary M2 lease.
@@ -46,6 +133,8 @@ pub struct PeerAdvertisement {
 pub enum PeerCapability {
     /// Supports the M1 chunk protocol through one automatically selected relay.
     RelayedTransferV0,
+    /// Supports M4 manifest/availability exchange and requested chunks.
+    SwarmTransferV0,
 }
 
 /// A relay advertisement held under a temporary M2 lease.
@@ -87,6 +176,8 @@ pub enum OverlayRequest {
     HeartbeatRelay { relay_id: String },
     /// Locate a provider and coordinate an automatic relay route.
     Discover { content_id: ContentId },
+    /// Locate several providers and coordinate one independent route per provider.
+    DiscoverProviders { content_id: ContentId, limit: u16 },
     /// Remove a relay that failed before a transfer could start.
     ReportRelayFailure { relay_id: String },
 }
@@ -100,6 +191,8 @@ pub enum OverlayResponse {
     Assignment(Option<RouteAssignment>),
     /// A receiver-side discovery result.
     Route(Option<RouteAssignment>),
+    /// Receiver-side routes for distinct providers of one content ID.
+    Routes(Vec<RouteAssignment>),
     /// The request completed without a result body.
     Acknowledged,
     /// The bootstrap rejected the request.
@@ -224,7 +317,7 @@ mod tests {
         }
 
         let (manifest, chunks) = Manifest::from_bytes(b"chunked bytes").unwrap();
-        let manifest_message = Message::Manifest(manifest);
+        let manifest_message = Message::Manifest(manifest.clone());
         assert_eq!(
             decode(&encode(manifest_message.clone()).unwrap()).unwrap(),
             manifest_message
@@ -234,6 +327,34 @@ mod tests {
             decode(&encode(chunk_message.clone()).unwrap()).unwrap(),
             chunk_message
         );
+        let availability = PieceAvailability::all(
+            u32::try_from(chunks.len()).expect("test manifest has few chunks"),
+        );
+        let swarm_message = Message::SwarmManifest {
+            manifest,
+            availability,
+        };
+        assert_eq!(
+            decode(&encode(swarm_message.clone()).unwrap()).unwrap(),
+            swarm_message
+        );
+    }
+
+    #[test]
+    fn piece_availability_is_compact_and_validated() {
+        let availability = PieceAvailability::from_indices(10, [0, 3, 9, 99]);
+        assert_eq!(availability.bits.len(), 2);
+        assert!(availability.is_valid());
+        assert!(availability.contains(0));
+        assert!(availability.contains(3));
+        assert!(availability.contains(9));
+        assert!(!availability.contains(1));
+
+        let malformed = PieceAvailability {
+            chunk_count: 9,
+            bits: vec![0, 0x80],
+        };
+        assert!(!malformed.is_valid());
     }
 
     #[test]

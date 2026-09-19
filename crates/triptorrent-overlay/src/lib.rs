@@ -92,10 +92,12 @@ impl Registry {
         if advertisement.content_ids.is_empty() {
             return Err(RegistryError::NoContent);
         }
-        if !advertisement
-            .capabilities
-            .contains(&PeerCapability::RelayedTransferV0)
-        {
+        if !advertisement.capabilities.iter().any(|capability| {
+            matches!(
+                capability,
+                PeerCapability::RelayedTransferV0 | PeerCapability::SwarmTransferV0
+            )
+        }) {
             return Err(RegistryError::UnsupportedPeer);
         }
         self.purge(now_ms);
@@ -164,15 +166,68 @@ impl Registry {
         let provider = self
             .peers
             .values()
-            .find(|peer| peer.advertisement.content_ids.contains(&content_id))?;
-        let relay = self.relays.values().next()?;
+            .find(|peer| peer.advertisement.content_ids.contains(&content_id))?
+            .advertisement
+            .clone();
+        let relay = self.relays.values().next()?.advertisement.clone();
+        Some(self.queue_assignment(now_ms, &provider, &relay, "m2"))
+    }
+
+    /// Creates independent relay routes for several distinct live providers.
+    #[must_use]
+    pub fn discover_providers(
+        &mut self,
+        now_ms: u64,
+        content_id: ContentId,
+        limit: usize,
+    ) -> Vec<RouteAssignment> {
+        self.purge(now_ms);
+        let providers: Vec<_> = self
+            .peers
+            .values()
+            .filter(|peer| {
+                peer.advertisement.content_ids.contains(&content_id)
+                    && peer
+                        .advertisement
+                        .capabilities
+                        .contains(&PeerCapability::SwarmTransferV0)
+            })
+            .take(limit)
+            .map(|peer| peer.advertisement.clone())
+            .collect();
+        let relays: Vec<_> = self
+            .relays
+            .values()
+            .map(|relay| relay.advertisement.clone())
+            .collect();
+        if relays.is_empty() {
+            return Vec::new();
+        }
+
+        providers
+            .into_iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                let relay = &relays[index % relays.len()];
+                self.queue_assignment(now_ms, &provider, relay, "m4")
+            })
+            .collect()
+    }
+
+    fn queue_assignment(
+        &mut self,
+        now_ms: u64,
+        provider: &PeerAdvertisement,
+        relay: &RelayAdvertisement,
+        prefix: &str,
+    ) -> RouteAssignment {
         self.next_route = self.next_route.wrapping_add(1);
         let assignment = RouteAssignment {
-            provider_id: provider.advertisement.peer_id,
-            provider_public_key: provider.advertisement.public_key,
-            relay_id: relay.advertisement.relay_id.clone(),
-            relay_address: relay.advertisement.address.clone(),
-            route: format!("m2-{:016x}", self.next_route),
+            provider_id: provider.peer_id,
+            provider_public_key: provider.public_key,
+            relay_id: relay.relay_id.clone(),
+            relay_address: relay.address.clone(),
+            route: format!("{prefix}-{:016x}", self.next_route),
         };
         self.assignments
             .entry(assignment.provider_id)
@@ -181,7 +236,7 @@ impl Registry {
                 assignment: assignment.clone(),
                 expires_at: now_ms.saturating_add(self.lease_ms),
             });
-        Some(assignment)
+        assignment
     }
 
     /// Renews a provider and returns its next still-valid route assignment.
@@ -348,6 +403,23 @@ impl BootstrapClient {
         }
     }
 
+    /// Discovers independent routes to several distinct providers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OverlayError`] if communication or decoding fails.
+    pub fn discover_providers(
+        &self,
+        content_id: ContentId,
+        limit: u16,
+    ) -> Result<Vec<RouteAssignment>, OverlayError> {
+        match self.request(OverlayRequest::DiscoverProviders { content_id, limit })? {
+            OverlayResponse::Routes(routes) => Ok(routes),
+            OverlayResponse::Error(message) => Err(OverlayError::Remote(message)),
+            _ => Err(OverlayError::UnexpectedResponse),
+        }
+    }
+
     /// Reports a relay that could not be used before transfer.
     ///
     /// # Errors
@@ -464,6 +536,9 @@ fn handle_request(
         OverlayRequest::Discover { content_id } => {
             OverlayResponse::Route(registry.discover(now_ms, content_id))
         }
+        OverlayRequest::DiscoverProviders { content_id, limit } => OverlayResponse::Routes(
+            registry.discover_providers(now_ms, content_id, usize::from(limit.min(16))),
+        ),
         OverlayRequest::ReportRelayFailure { relay_id } => {
             registry.report_relay_failure(&relay_id);
             OverlayResponse::Acknowledged
@@ -636,6 +711,28 @@ mod tests {
             registry.poll_peer(0, provider.peer_id).unwrap(),
             receiver_route
         );
+    }
+
+    #[test]
+    fn swarm_discovery_returns_distinct_providers_and_routes() {
+        let content_id = ContentId::digest(b"shared swarm content");
+        let mut registry = Registry::new(1_000);
+        for seed in 1..=3 {
+            let mut provider = peer(seed, vec![content_id]);
+            provider.capabilities.push(PeerCapability::SwarmTransferV0);
+            registry.register_peer(0, provider).unwrap();
+        }
+        registry.register_relay(0, relay("relay-a", 7000)).unwrap();
+        registry.register_relay(0, relay("relay-b", 7001)).unwrap();
+
+        let routes = registry.discover_providers(0, content_id, 8);
+        assert_eq!(routes.len(), 3);
+        assert_ne!(routes[0].provider_id, routes[1].provider_id);
+        assert_eq!(routes[0].relay_id, "relay-a");
+        assert_eq!(routes[1].relay_id, "relay-b");
+        for route in routes {
+            assert_eq!(registry.poll_peer(0, route.provider_id), Some(route));
+        }
     }
 
     #[test]

@@ -89,3 +89,13 @@ M3 keeps discovery, rendezvous and transfer as separate layers. The selected pro
 This direction removes the mandatory M2 service that sees the complete requester/content/provider mapping under a non-collusion assumption. It does not hide stable derived keys from DHT nodes, both transfer endpoints from their selected relay, or timing from broad observers. A public discovery capability permits observers holding it to recognize the lookup namespace.
 
 The no-I/O M3 model lives in `triptorrent-overlay::research`; no production DHT, OHTTP transport or rendezvous protocol has been implemented. [RFC 0002](../rfcs/0002-separated-multi-stage-discovery.md) defines the next experiment, and [the M3 report](M3_DISCOVERY_RESEARCH.md) contains the evidence and unresolved questions.
+
+## M4 swarm transfer
+
+M4 adds `triptorrent-swarm` for deterministic scheduling and bandwidth reservations while retaining the M2 bootstrap as replaceable discovery scaffolding. One discovery response creates at most eight independent provider routes, distributed deterministically across live relays. Each provider advertises a compact bitfield only after its end-to-end Noise session is established; piece availability is not published into the M3 research design.
+
+The receiver first obtains and compares manifests from connected providers. The requested content ID, total length, 32 KiB chunk size and ordered BLAKE3 chunk hashes must agree exactly. It then assigns one in-flight chunk per provider, preferring the lowest-index chunk among those with the fewest active sources. Verified responses are written by offset to a transfer-local partial file. A disconnect, unavailable response, wrong index or invalid digest disables that provider for the current transfer and releases its work to another source. Final output appears only after the complete content ID verifies.
+
+Resume uses `<output>.triptorrent-part` plus a Postcard-encoded `<output>.triptorrent-state`. The state contains a format version, the exact manifest and completion bits. On restart, every claimed completed chunk is reread and verified before reuse. Successful completion renames the partial file and removes metadata. This is download state, not the persistent node storage planned for M5.
+
+Download and upload limits use deterministic leaky-bucket reservations measured in bytes per second. Omitted or zero limits are unlimited. Scheduling is bounded by eight provider sessions; there is no tit-for-tat, choking, global reputation or long-lived provider score.

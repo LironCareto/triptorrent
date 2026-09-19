@@ -42,13 +42,16 @@ M2 proves local overlay mechanics only. The centralized bootstrap, control messa
 
 M3 recommends capability-derived DHT keys, encrypted signed rendezvous records, oblivious relay/gateway paths, diverse replication and separate M1 relay coordination. This is a research decision, not a production DHT or anonymity guarantee. OHTTP role separation, descriptor formats and randomized attacker-prefix experiments must be validated before replacing M2.
 
-## M4 — Swarm transfer
-- multiple sources
-- piece availability
-- scheduling
-- resume
-- bandwidth controls
-- malicious-piece handling
+## M4 — Swarm transfer (implemented prototype)
+- [x] multi-provider discovery over the temporary M2 bootstrap
+- [x] compact per-session piece availability
+- [x] bounded concurrent rarest-first scheduling and provider failover
+- [x] transfer-local verified resume state
+- [x] receiver download and provider upload limits
+- [x] corrupt, wrong, unavailable and failed-piece rejection
+- [x] Windows-safe process-level CLI acceptance tests
+
+M4 uses the current M2 discovery and relay services only as replaceable scaffolding. It does not implement the M3 DHT/OHTTP research direction, persistent-node storage or a global reputation system.
 
 ## M5 — Persistent node
 - daemon
