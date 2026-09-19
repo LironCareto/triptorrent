@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/triptorrent-core",
+    "crates/triptorrent-protocol",
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/LironCareto/triptorrent"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
