@@ -9,11 +9,11 @@ use std::time::Duration;
 use triptorrent_core::{CHUNK_SIZE, Chunk, ContentId, Manifest, PeerId};
 use triptorrent_net::{EncryptedSession, RelayRole, TcpRelayTransport, generate_peer_keypair};
 use triptorrent_overlay::BootstrapClient;
-use triptorrent_protocol::{Message, PeerAdvertisement, PeerCapability};
+use triptorrent_protocol::{Message, PeerAdvertisement, PeerCapability, RouteAssignment};
 
 const OVERLAY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OVERLAY_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
-const OVERLAY_MAX_ATTEMPTS: usize = 600;
+const FETCH_MAX_DISCOVERY_ATTEMPTS: usize = 600;
 
 /// Computes the experimental content ID of a local file.
 ///
@@ -160,37 +160,40 @@ pub fn share_file_via_overlay(bootstrap: SocketAddr, path: &Path) -> Result<Cont
     let client = BootstrapClient::new(bootstrap);
     client.register_peer(advertisement.clone())?;
 
-    let mut last_error = None;
-    for _ in 0..OVERLAY_MAX_ATTEMPTS {
-        let Some(assignment) = client.poll_peer(advertisement.peer_id)? else {
-            thread::sleep(OVERLAY_POLL_INTERVAL);
-            continue;
-        };
+    loop {
+        let assignment = poll_until_assignment(
+            || Ok(client.poll_peer(advertisement.peer_id)?),
+            || thread::sleep(OVERLAY_POLL_INTERVAL),
+        )?;
         let relay = assignment
             .relay_address
             .parse::<SocketAddr>()
             .context("bootstrap returned an invalid relay address")?;
-        let transport = match TcpRelayTransport::connect_with_timeout(
+        let Ok(transport) = TcpRelayTransport::connect_with_timeout(
             relay,
             &assignment.route,
             RelayRole::Sender,
             OVERLAY_SESSION_TIMEOUT,
-        ) {
-            Ok(transport) => transport,
-            Err(error) => {
-                let _ = client.report_relay_failure(&assignment.relay_id);
-                last_error = Some(anyhow::Error::new(error));
-                continue;
-            }
+        ) else {
+            let _ = client.report_relay_failure(&assignment.relay_id);
+            continue;
         };
         let mut session = EncryptedSession::provider(transport, &keypair.private)?;
         send_content(&mut session, &manifest, &chunks)?;
         return Ok(content_id);
     }
-    if let Some(error) = last_error {
-        return Err(error.context("all assigned overlay routes failed"));
+}
+
+fn poll_until_assignment(
+    mut poll: impl FnMut() -> Result<Option<RouteAssignment>>,
+    mut wait: impl FnMut(),
+) -> Result<RouteAssignment> {
+    loop {
+        if let Some(assignment) = poll()? {
+            return Ok(assignment);
+        }
+        wait();
     }
-    bail!("timed out waiting for an overlay receiver")
 }
 
 /// Discovers a provider and relay, then fetches and verifies content through M1 framing.
@@ -205,7 +208,7 @@ pub fn fetch_file_via_overlay(
 ) -> Result<()> {
     let client = BootstrapClient::new(bootstrap);
     let mut last_error = None;
-    for _ in 0..OVERLAY_MAX_ATTEMPTS {
+    for _ in 0..FETCH_MAX_DISCOVERY_ATTEMPTS {
         let Some(assignment) = client.discover(content_id)? else {
             thread::sleep(OVERLAY_POLL_INTERVAL);
             continue;
@@ -249,4 +252,34 @@ pub fn parse_psk(value: &str) -> Result<[u8; 32], String> {
     decoded
         .try_into()
         .map_err(|_| "key must contain exactly 64 hexadecimal characters".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_share_keeps_polling_past_fetch_discovery_limit() {
+        let public_key = [7; 32];
+        let expected = RouteAssignment {
+            provider_id: PeerId::from_public_key(&public_key),
+            provider_public_key: public_key,
+            relay_id: "relay-a".into(),
+            relay_address: "127.0.0.1:7000".into(),
+            route: "test-route".into(),
+        };
+        let mut polls = 0;
+
+        let assignment = poll_until_assignment(
+            || {
+                polls += 1;
+                Ok((polls > FETCH_MAX_DISCOVERY_ATTEMPTS).then(|| expected.clone()))
+            },
+            || {},
+        )
+        .expect("polling should continue until an assignment is available");
+
+        assert_eq!(polls, FETCH_MAX_DISCOVERY_ATTEMPTS + 1);
+        assert_eq!(assignment, expected);
+    }
 }
