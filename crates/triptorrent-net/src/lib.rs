@@ -3,13 +3,43 @@
 use snow::{Builder, HandshakeState, TransportState, params::NoiseParams};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
 use thiserror::Error;
 use triptorrent_protocol::{Message, ProtocolError};
 
 const REGISTRATION_MAGIC: &[u8; 4] = b"TTR0";
 const MAX_FRAME_LENGTH: usize = 1024 * 1024;
 const MAX_NOISE_MESSAGE: usize = 65_535;
-const NOISE_PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
+const NOISE_PSK_PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
+const NOISE_PROVIDER_PATTERN: &str = "Noise_KN_25519_ChaChaPoly_BLAKE2s";
+
+/// Ephemeral key material for an M2 content-provider process.
+pub struct PeerKeypair {
+    /// Private Noise key. It must remain local to the provider process.
+    pub private: [u8; 32],
+    /// Public Noise key advertised through the temporary bootstrap.
+    pub public: [u8; 32],
+}
+
+/// Generates an ephemeral X25519 keypair through the reviewed Noise implementation.
+///
+/// # Errors
+///
+/// Returns [`NetError`] if Noise setup or key generation fails.
+pub fn generate_peer_keypair() -> Result<PeerKeypair, NetError> {
+    let params = parse_noise_pattern(NOISE_PROVIDER_PATTERN)?;
+    let keypair = Builder::new(params).generate_keypair()?;
+    Ok(PeerKeypair {
+        private: keypair
+            .private
+            .try_into()
+            .map_err(|_| NetError::InvalidKeyLength)?,
+        public: keypair
+            .public
+            .try_into()
+            .map_err(|_| NetError::InvalidKeyLength)?,
+    })
+}
 
 /// The endpoint role used only to pair connections at a relay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,9 +88,35 @@ impl TcpRelayTransport {
     ///
     /// Returns [`NetError`] for invalid routes or connection failures.
     pub fn connect(address: SocketAddr, route: &str, role: RelayRole) -> Result<Self, NetError> {
+        let stream = TcpStream::connect(address)?;
+        Self::register(stream, route, role, None)
+    }
+
+    /// Connects and applies an I/O timeout, used by M2 failover attempts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError`] for invalid routes, timeouts, or connection failures.
+    pub fn connect_with_timeout(
+        address: SocketAddr,
+        route: &str,
+        role: RelayRole,
+        timeout: Duration,
+    ) -> Result<Self, NetError> {
+        let stream = TcpStream::connect_timeout(&address, timeout)?;
+        Self::register(stream, route, role, Some(timeout))
+    }
+
+    fn register(
+        mut stream: TcpStream,
+        route: &str,
+        role: RelayRole,
+        timeout: Option<Duration>,
+    ) -> Result<Self, NetError> {
         validate_route(route)?;
-        let mut stream = TcpStream::connect(address)?;
         stream.set_nodelay(true)?;
+        stream.set_read_timeout(timeout)?;
+        stream.set_write_timeout(timeout)?;
         let mut registration = Vec::with_capacity(5 + route.len());
         registration.extend_from_slice(REGISTRATION_MAGIC);
         registration.push(role.wire_byte());
@@ -106,6 +162,32 @@ impl<T: FrameTransport> EncryptedSession<T> {
     /// Returns [`NetError`] when setup, key agreement, or transport I/O fails.
     pub fn responder(transport: T, psk: &[u8; 32]) -> Result<Self, NetError> {
         let handshake = noise_builder(psk)?.build_responder()?;
+        Self::handshake_responder(transport, handshake)
+    }
+
+    /// Establishes the M2 provider side using an ephemeral static private key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError`] when setup, key agreement, or transport I/O fails.
+    pub fn provider(transport: T, private_key: &[u8; 32]) -> Result<Self, NetError> {
+        let params = parse_noise_pattern(NOISE_PROVIDER_PATTERN)?;
+        let handshake = Builder::new(params)
+            .local_private_key(private_key)?
+            .build_initiator()?;
+        Self::handshake_initiator(transport, handshake)
+    }
+
+    /// Establishes the M2 receiver side using the discovered provider public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError`] when setup, peer authentication, or transport I/O fails.
+    pub fn receiver(transport: T, provider_public_key: &[u8; 32]) -> Result<Self, NetError> {
+        let params = parse_noise_pattern(NOISE_PROVIDER_PATTERN)?;
+        let handshake = Builder::new(params)
+            .remote_public_key(provider_public_key)?
+            .build_responder()?;
         Self::handshake_responder(transport, handshake)
     }
 
@@ -165,10 +247,12 @@ impl<T: FrameTransport> EncryptedSession<T> {
 }
 
 fn noise_builder(psk: &[u8; 32]) -> Result<Builder<'_>, NetError> {
-    let params: NoiseParams = NOISE_PATTERN
-        .parse()
-        .map_err(|_| NetError::InvalidNoisePattern)?;
+    let params = parse_noise_pattern(NOISE_PSK_PATTERN)?;
     Ok(Builder::new(params).psk(0, psk)?)
+}
+
+fn parse_noise_pattern(pattern: &str) -> Result<NoiseParams, NetError> {
+    pattern.parse().map_err(|_| NetError::InvalidNoisePattern)
 }
 
 fn validate_route(route: &str) -> Result<(), NetError> {
@@ -235,4 +319,7 @@ pub enum NetError {
     /// The static Noise name embedded in the prototype was invalid.
     #[error("invalid built-in Noise protocol name")]
     InvalidNoisePattern,
+    /// A Noise backend returned an unexpected key length.
+    #[error("Noise backend returned an invalid key length")]
+    InvalidKeyLength,
 }

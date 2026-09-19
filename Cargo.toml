@@ -4,6 +4,7 @@ members = [
     "crates/triptorrent-cli",
     "crates/triptorrent-core",
     "crates/triptorrent-net",
+    "crates/triptorrent-overlay",
     "crates/triptorrent-protocol",
     "crates/triptorrent-relay",
 ]

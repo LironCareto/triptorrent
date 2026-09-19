@@ -22,3 +22,17 @@ This directory will contain the normative TripTorrent protocol specification.
 14. Compatibility considerations
 
 Until a version is explicitly marked stable, all wire formats are subject to change.
+
+## Experimental M2 bootstrap messages
+
+M2 currently uses a non-normative, versioned Postcard request/response protocol over length-prefixed TCP connections. Requests cover:
+
+- peer registration with an ephemeral peer ID, Noise public key, transfer capabilities and content IDs;
+- peer heartbeat and route polling;
+- relay registration and heartbeat with an identifier and TCP address;
+- discovery by content ID;
+- relay-failure reporting.
+
+Responses acknowledge a server-controlled lease or return an optional route assignment. An assignment contains the provider ID and public key, selected relay ID and address, and an automatically generated route ID. Registrations and queued routes expire according to the bootstrap's monotonic lease clock.
+
+These messages are prototype scaffolding, are not authenticated, and are not the normative TripTorrent discovery protocol. Their current encoding and semantics may be removed or replaced during M3.

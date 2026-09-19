@@ -47,6 +47,24 @@ impl FromStr for ContentId {
     }
 }
 
+/// An ephemeral, experimental peer identifier derived from a Noise public key.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct PeerId([u8; 32]);
+
+impl PeerId {
+    /// Derives a peer identifier from an advertised public key.
+    #[must_use]
+    pub fn from_public_key(public_key: &[u8; 32]) -> Self {
+        Self(*blake3::hash(public_key).as_bytes())
+    }
+}
+
+impl fmt::Display for PeerId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&hex::encode(self.0))
+    }
+}
+
 /// A BLAKE3 identifier for one chunk.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct ChunkId([u8; 32]);

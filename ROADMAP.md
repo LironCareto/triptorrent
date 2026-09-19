@@ -21,13 +21,16 @@ TripTorrent is currently in design/pre-alpha.
 
 M1 validates the executable vertical slice only. Its content IDs, wire format, route registration, key distribution and session setup are experimental rather than normative. It makes no anonymity claim: the relay and network observers still learn connection metadata, timing and traffic volume.
 
-## M2 — Multi-node overlay
-- peer discovery
-- rendezvous
-- relay selection
-- reconnects
-- churn handling
-- simulation harness
+## M2 — Multi-node overlay (implemented prototype)
+- [x] leased peer and content advertisements
+- [x] temporary bootstrap/rendezvous service
+- [x] leased relay advertisements and deterministic selection
+- [x] automatically coordinated relay routes
+- [x] disconnect, expiry, reconnect and relay failover handling
+- [x] deterministic 10-peer/3-relay simulation harness
+- [x] discovery-driven encrypted M1 transfer
+
+M2 proves local overlay mechanics only. The centralized bootstrap, control messages, ephemeral peer identifiers, lease values and selection policy are experimental. Anonymous and decentralized discovery remain M3 research topics.
 
 ## M3 — Anonymous discovery research
 - DHT/overlay candidate evaluation

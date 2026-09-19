@@ -1,12 +1,19 @@
-#![doc = "Reusable file-transfer operations for the local M1 command-line demo."]
+#![doc = "Reusable M1 transfer and M2 overlay operations for the local demo."]
 
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
-use triptorrent_core::{CHUNK_SIZE, ContentId, Manifest};
-use triptorrent_net::{EncryptedSession, RelayRole, TcpRelayTransport};
-use triptorrent_protocol::Message;
+use std::thread;
+use std::time::Duration;
+use triptorrent_core::{CHUNK_SIZE, Chunk, ContentId, Manifest, PeerId};
+use triptorrent_net::{EncryptedSession, RelayRole, TcpRelayTransport, generate_peer_keypair};
+use triptorrent_overlay::BootstrapClient;
+use triptorrent_protocol::{Message, PeerAdvertisement, PeerCapability};
+
+const OVERLAY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const OVERLAY_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
+const OVERLAY_MAX_ATTEMPTS: usize = 600;
 
 /// Computes the experimental content ID of a local file.
 ///
@@ -30,9 +37,7 @@ pub fn share_file(
     psk: &[u8; 32],
     path: &Path,
 ) -> Result<ContentId> {
-    let bytes =
-        fs::read(path).with_context(|| format!("failed to read source file {}", path.display()))?;
-    let (manifest, chunks) = Manifest::from_bytes(&bytes)?;
+    let (manifest, chunks) = load_content(path)?;
     let content_id = manifest.content_id;
 
     let transport = TcpRelayTransport::connect(relay, route, RelayRole::Sender)
@@ -40,13 +45,22 @@ pub fn share_file(
     let mut session = EncryptedSession::initiator(transport, psk)
         .context("failed to establish encrypted peer session")?;
 
+    send_content(&mut session, &manifest, &chunks)?;
+    Ok(content_id)
+}
+
+fn send_content(
+    session: &mut EncryptedSession<TcpRelayTransport>,
+    manifest: &Manifest,
+    chunks: &[Chunk],
+) -> Result<()> {
     match session
         .receive()
         .context("failed to receive content request")?
     {
         Message::Request {
             content_id: requested,
-        } if requested == content_id => {}
+        } if requested == manifest.content_id => {}
         Message::Request { .. } => {
             session.send(Message::Error(
                 "content ID is not shared on this route".into(),
@@ -56,12 +70,12 @@ pub fn share_file(
         _ => bail!("receiver did not begin with a content request"),
     }
 
-    session.send(Message::Manifest(manifest))?;
+    session.send(Message::Manifest(manifest.clone()))?;
     for chunk in chunks {
-        session.send(Message::Chunk(chunk))?;
+        session.send(Message::Chunk(chunk.clone()))?;
     }
     session.send(Message::Complete)?;
-    Ok(content_id)
+    Ok(())
 }
 
 /// Fetches, verifies, and atomically writes one file received through the relay.
@@ -80,6 +94,14 @@ pub fn fetch_file(
         .context("failed to connect receiver to relay")?;
     let mut session = EncryptedSession::responder(transport, psk)
         .context("failed to establish encrypted peer session")?;
+    receive_content(&mut session, content_id, output)
+}
+
+fn receive_content(
+    session: &mut EncryptedSession<TcpRelayTransport>,
+    content_id: ContentId,
+    output: &Path,
+) -> Result<()> {
     session.send(Message::Request { content_id })?;
 
     let manifest = match session.receive()? {
@@ -112,6 +134,108 @@ pub fn fetch_file(
     fs::rename(&temporary, output)
         .with_context(|| format!("failed to finalize output file {}", output.display()))?;
     Ok(())
+}
+
+fn load_content(path: &Path) -> Result<(Manifest, Vec<Chunk>)> {
+    let bytes =
+        fs::read(path).with_context(|| format!("failed to read source file {}", path.display()))?;
+    Ok(Manifest::from_bytes(&bytes)?)
+}
+
+/// Advertises and serves one file through an automatically coordinated M2 route.
+///
+/// # Errors
+///
+/// Returns an error for file, bootstrap, relay, session, or transfer failures.
+pub fn share_file_via_overlay(bootstrap: SocketAddr, path: &Path) -> Result<ContentId> {
+    let (manifest, chunks) = load_content(path)?;
+    let content_id = manifest.content_id;
+    let keypair = generate_peer_keypair()?;
+    let advertisement = PeerAdvertisement {
+        peer_id: PeerId::from_public_key(&keypair.public),
+        public_key: keypair.public,
+        capabilities: vec![PeerCapability::RelayedTransferV0],
+        content_ids: vec![content_id],
+    };
+    let client = BootstrapClient::new(bootstrap);
+    client.register_peer(advertisement.clone())?;
+
+    let mut last_error = None;
+    for _ in 0..OVERLAY_MAX_ATTEMPTS {
+        let Some(assignment) = client.poll_peer(advertisement.peer_id)? else {
+            thread::sleep(OVERLAY_POLL_INTERVAL);
+            continue;
+        };
+        let relay = assignment
+            .relay_address
+            .parse::<SocketAddr>()
+            .context("bootstrap returned an invalid relay address")?;
+        let transport = match TcpRelayTransport::connect_with_timeout(
+            relay,
+            &assignment.route,
+            RelayRole::Sender,
+            OVERLAY_SESSION_TIMEOUT,
+        ) {
+            Ok(transport) => transport,
+            Err(error) => {
+                let _ = client.report_relay_failure(&assignment.relay_id);
+                last_error = Some(anyhow::Error::new(error));
+                continue;
+            }
+        };
+        let mut session = EncryptedSession::provider(transport, &keypair.private)?;
+        send_content(&mut session, &manifest, &chunks)?;
+        return Ok(content_id);
+    }
+    if let Some(error) = last_error {
+        return Err(error.context("all assigned overlay routes failed"));
+    }
+    bail!("timed out waiting for an overlay receiver")
+}
+
+/// Discovers a provider and relay, then fetches and verifies content through M1 framing.
+///
+/// # Errors
+///
+/// Returns an error for discovery, relay, session, integrity, or file failures.
+pub fn fetch_file_via_overlay(
+    bootstrap: SocketAddr,
+    content_id: ContentId,
+    output: &Path,
+) -> Result<()> {
+    let client = BootstrapClient::new(bootstrap);
+    let mut last_error = None;
+    for _ in 0..OVERLAY_MAX_ATTEMPTS {
+        let Some(assignment) = client.discover(content_id)? else {
+            thread::sleep(OVERLAY_POLL_INTERVAL);
+            continue;
+        };
+        let relay = assignment
+            .relay_address
+            .parse::<SocketAddr>()
+            .context("bootstrap returned an invalid relay address")?;
+        let transport = match TcpRelayTransport::connect_with_timeout(
+            relay,
+            &assignment.route,
+            RelayRole::Receiver,
+            OVERLAY_SESSION_TIMEOUT,
+        ) {
+            Ok(transport) => transport,
+            Err(error) => {
+                let _ = client.report_relay_failure(&assignment.relay_id);
+                last_error = Some(anyhow::Error::new(error));
+                thread::sleep(OVERLAY_POLL_INTERVAL);
+                continue;
+            }
+        };
+        let mut session = EncryptedSession::receiver(transport, &assignment.provider_public_key)?;
+        receive_content(&mut session, content_id, output)?;
+        return Ok(());
+    }
+    if let Some(error) = last_error {
+        return Err(error.context("all discovered overlay routes failed"));
+    }
+    bail!("content was not discoverable before the local timeout")
 }
 
 /// Parses a 32-byte hexadecimal pre-shared session key.

@@ -795,6 +795,7 @@ dependencies = [
  "tempfile",
  "triptorrent-core",
  "triptorrent-net",
+ "triptorrent-overlay",
  "triptorrent-protocol",
  "triptorrent-relay",
 ]
@@ -815,6 +816,15 @@ version = "0.0.0"
 dependencies = [
  "snow",
  "thiserror",
+ "triptorrent-protocol",
+]
+
+[[package]]
+name = "triptorrent-overlay"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "triptorrent-core",
  "triptorrent-protocol",
 ]
 

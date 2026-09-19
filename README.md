@@ -16,18 +16,27 @@ There is no stable wire protocol yet and there are currently **no security or an
 
 ## Current prototype
 
-M1 demonstrates a local, single-relay transfer: two peers establish an end-to-end Noise session using a pre-shared key, the receiver requests a BLAKE3 content ID, and verified chunks travel only through the relay. The relay sees route identifiers, connection metadata, timing, sizes and encrypted frames, but it does not receive the session key or file plaintext.
+M2 extends the encrypted M1 transfer into a local multi-node overlay. Peers advertise experimental content IDs under short leases, relays advertise availability, and a temporary bootstrap selects a provider and relay and creates an automatic route. The receiver needs only the bootstrap address and content ID; peers still connect exclusively through a relay.
 
-The content-ID format, 32 KiB chunking, wire messages, route setup and key distribution are experimental. This prototype does not provide anonymity, discovery, traffic-analysis resistance, multi-hop routing, BitTorrent compatibility or production hardening.
+The bootstrap is a prototype rendezvous service, not the final decentralized discovery design. It observes peer IP addresses, ephemeral peer IDs and public keys, content advertisements and queries, relay endpoints, selected routes, timing and churn. It can substitute advertised keys because M2 has no durable identity or authenticated bootstrap protocol. M2 therefore provides no anonymity guarantee and must not be used for privacy-sensitive transfers.
 
-Build with `cargo build --workspace`, then run the demo in three terminals. Replace `<CONTENT_ID>` with the output from `id`; the sample key is only suitable for a local demonstration.
+Build with `cargo build --workspace`, then run the demo in separate terminals. Start the bootstrap and at least two relays:
 
 ```bash
-cargo run -p triptorrent-cli -- relay --listen 127.0.0.1:7000
-cargo run -p triptorrent-cli -- id ./source.bin
-cargo run -p triptorrent-cli -- share --relay 127.0.0.1:7000 --route demo --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f --file ./source.bin
-cargo run -p triptorrent-cli -- fetch --relay 127.0.0.1:7000 --route demo --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f --content <CONTENT_ID> --output ./received.bin
+cargo run -p triptorrent-cli -- bootstrap --listen 127.0.0.1:7100
+cargo run -p triptorrent-cli -- relay --listen 127.0.0.1:7001 --bootstrap 127.0.0.1:7100 --id relay-a
+cargo run -p triptorrent-cli -- relay --listen 127.0.0.1:7002 --bootstrap 127.0.0.1:7100 --id relay-b
 ```
+
+Identify and share a file, then copy the printed ID into the fetch command:
+
+```bash
+cargo run -p triptorrent-cli -- id ./source.bin
+cargo run -p triptorrent-cli -- share --bootstrap 127.0.0.1:7100 --file ./source.bin
+cargo run -p triptorrent-cli -- fetch --bootstrap 127.0.0.1:7100 --content <CONTENT_ID> --output ./received.bin
+```
+
+The content-ID format, chunking, overlay messages, leases, ephemeral identities, bootstrap, selection policy and Noise pattern remain experimental. M2 does not implement a DHT, multi-hop routing, traffic-analysis resistance, BitTorrent compatibility, NAT traversal or production hardening. Manual M1 `--relay`, `--route` and `--key` commands remain available for regression testing.
 
 ## Compatibility with the BitTorrent ecosystem
 

@@ -12,6 +12,7 @@ clap.workspace = true
 hex.workspace = true
 triptorrent-core = { path = "../triptorrent-core" }
 triptorrent-net = { path = "../triptorrent-net" }
+triptorrent-overlay = { path = "../triptorrent-overlay" }
 triptorrent-protocol = { path = "../triptorrent-protocol" }
 triptorrent-relay = { path = "../triptorrent-relay" }
 
