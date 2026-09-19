@@ -14,9 +14,26 @@ The conceptual relationship is closer to **Kademlia relative to eD2k** than to �
 
 There is no stable wire protocol yet and there are currently **no security or anonymity guarantees**. Do not rely on TripTorrent for privacy-sensitive use until the threat model, protocol, independent review and interoperability tests are substantially more mature.
 
+## Compatibility with the BitTorrent ecosystem
+
+TripTorrent is intended to **revitalize BitTorrent, not abandon its ecosystem**.
+
+A core design goal is to keep as much of today’s BitTorrent infrastructure useful as possible, end to end, including existing content identifiers, magnets, metadata, torrent files, swarms, trackers, DHT concepts, clients and distribution workflows wherever compatibility can be preserved without defeating TripTorrent’s security and privacy goals.
+
+The preferred migration path is evolutionary:
+
+- existing BitTorrent content should remain discoverable and reusable where technically possible;
+- existing clients should be able to add TripTorrent support without having to become entirely different applications;
+- existing publishing and distribution workflows should require as little disruption as possible;
+- TripTorrent-native peers and infrastructure should coexist with classic BitTorrent infrastructure during adoption;
+- protocol extensions should prefer backward-compatible or dual-stack operation when this does not create a privacy or security downgrade.
+
+Compatibility is therefore a **first-class requirement**, not an afterthought. When compatibility and a core security property are in direct conflict, that trade-off must be explicit, documented and justified rather than silently breaking either side.
+
 ## Goals
 
 - Preserve efficient swarm-based distribution.
+- Preserve as much of the existing BitTorrent ecosystem and infrastructure as practical.
 - Keep content verifiable and content-addressed.
 - Make privacy and security protocol properties rather than optional client add-ons.
 - Reduce direct exposure of peer network identity where practical.
@@ -29,10 +46,11 @@ There is no stable wire protocol yet and there are currently **no security or an
 ## Non-goals
 
 - Becoming a proprietary network tied to one client.
+- Replacing the BitTorrent ecosystem merely for the sake of creating something new.
 - Hiding protocol decisions inside the reference implementation.
 - Promising “perfect anonymity”.
 - Sacrificing all throughput merely to resemble Tor.
-- Preserving BitTorrent compatibility when doing so would force TripTorrent to inherit a security weakness.
+- Preserving a specific BitTorrent behaviour when it would necessarily defeat a core TripTorrent security property.
 
 ## Repository layout
 
