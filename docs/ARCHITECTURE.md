@@ -27,8 +27,8 @@ Optional mechanisms for importing or mapping BitTorrent identifiers and metadata
 
 ## Current open questions
 
-- Which content identifier format should be normative?
-- Should BitTorrent v2 infohashes be reusable directly?
+- What should the canonical TripTorrent multifile/tree identifier be?
+- How should verified BitTorrent aliases be authenticated in native metadata?
 - What routing model gives acceptable privacy without destroying throughput?
 - How many relay hops should be typical?
 - How should bootstrap work without creating a practical central point?
@@ -107,3 +107,11 @@ M5 adds `triptorrent-node` as an implementation layer above the existing network
 `triptorrent-cli` supplies the current M4 adapter and acts as a client of the local API for persistent operations. Command parsing does not own daemon state, storage or API routing. A future GUI can call the same API without embedding CLI behavior.
 
 At startup the node verifies indexed bytes and manifests, disables sharing for missing or corrupt entries, converts stale `running` downloads to `interrupted`, resumes those downloads from M4's verified partial files, and starts new advertisements for valid shared content. Relay routes, connections and protocol peer keys remain ephemeral and are rebuilt. See [ADR 0006](adr/0006-m5-persistent-node.md) for the boundary and [the M5 guide](M5_PERSISTENT_NODE.md) for operational details.
+
+## M6 BitTorrent compatibility boundary
+
+M6 keeps the current TripTorrent BLAKE3 content identity independent from BitTorrent identities. BEP 3 `btih` and BEP 52 `btmh` values are typed aliases because they hash exact torrent `info` metadata rather than bare payload bytes. Metadata import records aliases as unverified; reading and validating payload bytes binds aliases to a TripTorrent manifest. Multifile torrents require a future canonical tree identity and cannot be represented safely as concatenated blobs.
+
+The persistent content layer is shared by isolated network adapters. A TripTorrent-native adapter uses an M3 discovery capability, native discovery, and relayed transfer. A future classic adapter may use trackers, Mainline DHT, PEX, local discovery, web seeds, and direct peers only under an explicit dual-network or classic policy. TripTorrent-only policy fails closed and never invokes the classic adapter. Network modes, active paths, alias status, and private-torrent restrictions must remain visible through local APIs and clients.
+
+M6 implements only an offline research crate for strict bencoding, identity calculation, magnet parsing, Merkle validation, and path sanitization. It adds no production BitTorrent network component. [RFC 0004](../rfcs/0004-namespaced-bittorrent-compatibility.md) defines the selected architecture; [the research report](M6_BITTORRENT_INTEROP_RESEARCH.md) records evidence and remaining questions.

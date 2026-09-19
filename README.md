@@ -16,6 +16,8 @@ There is no stable wire protocol yet and there are currently **no security or an
 
 ## Current prototype
 
+M6 completes BitTorrent interoperability research without adding a production BitTorrent network stack. The selected design keeps TripTorrent content IDs independent, records verified v1/v2 infohashes as typed aliases, and places classic networking behind explicit `triptorrent-only`, dual-network, or classic policies. See the [M6 research report](docs/M6_BITTORRENT_INTEROP_RESEARCH.md), [RFC 0004](rfcs/0004-namespaced-bittorrent-compatibility.md), and [ADR 0007](docs/adr/0007-m6-namespaced-identifiers-and-explicit-compatibility.md).
+
 M5 adds a persistent reference node around the M4 transfer engine. The `triptorrent-node` crate owns the daemon lifecycle, SQLite index, managed content store, recovery state and versioned loopback HTTP API. The CLI remains a front-end to that API, which also gives a future GUI a stable local boundary. [ADR 0006](docs/adr/0006-m5-persistent-node.md) and the [M5 node guide](docs/M5_PERSISTENT_NODE.md) describe the implementation.
 
 Initialize and start a node after starting the temporary bootstrap and relays shown below:
@@ -90,6 +92,10 @@ The preferred migration path is evolutionary:
 
 Compatibility is therefore a **first-class requirement**, not an afterthought. When compatibility and a core security property are in direct conflict, that trade-off must be explicit, documented and justified rather than silently breaking either side.
 
+## Related projects
+
+[Related work](docs/RELATED_WORK.md) compares TripTorrent with Tribler and BitTorrent over I2P. TripTorrent's specific goal is a client-independent protocol evolution with separable privacy and compatibility layers, rather than one anonymous torrent client.
+
 ## Goals
 
 - Preserve efficient swarm-based distribution.
@@ -137,6 +143,8 @@ Protocol changes that affect interoperability should be documented before they b
 - [Threat model](docs/THREAT_MODEL.md)
 - [M3 discovery research](docs/M3_DISCOVERY_RESEARCH.md)
 - [M5 persistent node](docs/M5_PERSISTENT_NODE.md)
+- [M6 BitTorrent interoperability research](docs/M6_BITTORRENT_INTEROP_RESEARCH.md)
+- [Related work](docs/RELATED_WORK.md)
 - [Design principles](docs/DESIGN_PRINCIPLES.md)
 - [Roadmap](ROADMAP.md)
 - [Protocol specification](spec/README.md)

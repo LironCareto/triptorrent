@@ -58,3 +58,9 @@ The current resume files and bandwidth-limit algorithm are local implementation 
 ## M5 implementation boundary
 
 The persistent node, SQLite schema, managed directory layout, TOML configuration, structured logs and `/v1` loopback control API are reference-implementation behavior. M5 changes no TripTorrent wire message, discovery record or peer-identity rule. In particular, restarting a local node creates fresh ephemeral M2 advertisements and routes rather than restoring network sessions or introducing a durable protocol identity.
+
+## M6 interoperability clarification
+
+BitTorrent v1 `btih`, v2 `btmh`, and TripTorrent content IDs are separate typed namespaces with different commitment semantics. A BitTorrent infohash covers exact bencoded `info` metadata; the current experimental TripTorrent ID covers one raw byte string. An implementation must not substitute one for another. BitTorrent aliases become associated with TripTorrent content only after the promised metadata and payload verify.
+
+TripTorrent-native discovery capabilities are separate from content identity and BitTorrent aliases. A TripTorrent-only request must fail closed and must not query classic trackers, Mainline DHT, PEX, local discovery, web seeds, or direct peers. Dual-network and classic operation require explicit policy and path reporting. These are architectural requirements from [RFC 0004](../rfcs/0004-namespaced-bittorrent-compatibility.md); exact identifier encodings, links, alias bindings, mode negotiation and multifile identity remain non-normative and require later specification.

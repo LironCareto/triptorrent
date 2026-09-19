@@ -78,6 +78,16 @@ Imported files are copied into managed storage and verified before indexing. Sta
 
 Structured logs omit API tokens and cryptographic key material, but normal logs contain content IDs, transfer outcomes, local paths and API addresses. Debug output from the transfer stack can also contain peer, route and timing metadata. Logs must therefore be treated as privacy-sensitive operational data. Persistence does not create a durable protocol peer identity or improve M2/M4 anonymity properties.
 
+## M6 BitTorrent compatibility
+
+Classic BitTorrent mechanisms have a different disclosure model. A tracker associates a requester address, infohash, timing and transfer counters. Mainline DHT nodes see the requester's source address and infohash-derived lookup key. Tracker, DHT and PEX results distribute peer endpoints; local discovery broadcasts an infohash and listening port. Web seeds observe requester addresses, requested objects/ranges, timing and volume. Direct classic peers see each other's endpoints.
+
+TripTorrent-only mode must never use those paths. Dual-network and classic modes require explicit selection and disclose that native endpoint/content-query protections do not apply to classic activity. Running both networks, or using a bridge, permits correlation through aliases, payload size, availability and timing. A bridge sees both identity namespaces and is an explicit trust and correlation point.
+
+Imported metadata is hostile input. Strict canonical bencoding, size/depth bounds, exact-topic verification, safe path resolution, normalization/collision checks and complete payload verification are required. V1 SHA-1 is retained only as a compatibility alias; it is not the sole TripTorrent integrity root. Hybrid content must not accept removal of the promised v2 identity as a downgrade. A BEP 27 private flag restricts classic peer discovery but does not hide the requester from its tracker or peers and must not authorize automatic TripTorrent publication or bridging.
+
+See the [M6 threat matrix](M6_BITTORRENT_INTEROP_RESEARCH.md#12-compatibility-threat-matrix) for path-specific controls.
+
 ## Security rule
 
 No protocol component should make an anonymity claim stronger than what the threat model and implementation can support.

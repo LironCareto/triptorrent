@@ -1,0 +1,97 @@
+{
+  "format_version": 1,
+  "payload_hex": "54726970546f7272656e74204d3620766563746f72207061796c6f61640a",
+  "triptorrent_content_id": "db5d918a54a029ec640f0c9fcf7d231f39d3cae27c76b58e4271ae02b5fa512d",
+  "torrents": [
+    {
+      "name": "v1-single",
+      "metainfo_hex": "64343a696e666f64363a6c656e67746869333065343a6e616d6531313a7061796c6f61642e62696e31323a7069656365206c656e67746869313633383465363a70696563657332303a09baad66f70c81fc6c1006ee5445547558739f356565",
+      "kind": "v1",
+      "btih": "208b088ea7a1fc55c74459446819d8d952197c51",
+      "btmh_sha256": null
+    },
+    {
+      "name": "v1-same-payload-renamed",
+      "metainfo_hex": "64343a696e666f64363a6c656e67746869333065343a6e616d6531313a72656e616d65642e62696e31323a7069656365206c656e67746869313633383465363a70696563657332303a09baad66f70c81fc6c1006ee5445547558739f356565",
+      "kind": "v1",
+      "btih": "18cc8becdf4540002f3a998524168549e744f30e",
+      "btmh_sha256": null
+    },
+    {
+      "name": "v2-single",
+      "metainfo_hex": "64343a696e666f64393a66696c6520747265656431313a7061796c6f61642e62696e64303a64363a6c656e6774686933306531313a70696563657320726f6f7433323a5e229d5294bb6227eca51574a9e97189073b289aa5fe188490b34ec3cb32eeb165656531323a6d6574612076657273696f6e693265343a6e616d6531313a7061796c6f61642e62696e31323a7069656365206c656e677468693136333834656565",
+      "kind": "v2",
+      "btih": null,
+      "btmh_sha256": "ca344924597443e1b027026cef64cbba61e43c0d44ee5c0c4c27e2cec80fe012"
+    },
+    {
+      "name": "hybrid-single",
+      "metainfo_hex": "64343a696e666f64393a66696c6520747265656431313a7061796c6f61642e62696e64303a64363a6c656e6774686933306531313a70696563657320726f6f7433323a5e229d5294bb6227eca51574a9e97189073b289aa5fe188490b34ec3cb32eeb1656565363a6c656e6774686933306531323a6d6574612076657273696f6e693265343a6e616d6531313a7061796c6f61642e62696e31323a7069656365206c656e67746869313633383465363a70696563657332303a09baad66f70c81fc6c1006ee5445547558739f356565",
+      "kind": "hybrid",
+      "btih": "d178b313885d5ec7f4944c5a162faccbf8550cd8",
+      "btmh_sha256": "1772468ebd823d2726ecef0bc7ffc96ec9d1e3e62939f11f633f97844e6b03ac"
+    }
+  ],
+  "magnets": [
+    {
+      "uri": "magnet:?xt=urn:btih:208b088ea7a1fc55c74459446819d8d952197c51&dn=M6%20payload&tr=https%3A%2F%2Ftracker.example%2Fannounce&x.pe=127.0.0.1%3A6881",
+      "btih_count": 1,
+      "btmh_count": 0
+    },
+    {
+      "uri": "magnet:?xt=urn:btmh:1220ca344924597443e1b027026cef64cbba61e43c0d44ee5c0c4c27e2cec80fe012&dn=M6%20payload&ws=https%3A%2F%2Fseed.example%2Fpayload.bin",
+      "btih_count": 0,
+      "btmh_count": 1
+    },
+    {
+      "uri": "magnet:?xt=urn:btih:d178b313885d5ec7f4944c5a162faccbf8550cd8&xt=urn:btmh:12201772468ebd823d2726ecef0bc7ffc96ec9d1e3e62939f11f633f97844e6b03ac&tr=https%3A%2F%2Ftracker.example%2Fannounce",
+      "btih_count": 1,
+      "btmh_count": 1
+    }
+  ],
+  "malformed_bencoding_hex": [
+    "69303365",
+    "692d3065",
+    "64313a62313a78313a61313a7965",
+    "343a616263",
+    "64313a61313a78313a61313a7965",
+    "69316565"
+  ],
+  "paths": [
+    {
+      "input": "payload.bin",
+      "safe": true,
+      "normalized": "payload.bin"
+    },
+    {
+      "input": "..",
+      "safe": false,
+      "normalized": null
+    },
+    {
+      "input": "dir/file",
+      "safe": false,
+      "normalized": null
+    },
+    {
+      "input": "a\\b",
+      "safe": false,
+      "normalized": null
+    },
+    {
+      "input": "CON.txt",
+      "safe": false,
+      "normalized": null
+    },
+    {
+      "input": "trail.",
+      "safe": false,
+      "normalized": null
+    },
+    {
+      "input": "é.txt",
+      "safe": true,
+      "normalized": "é.txt"
+    }
+  ]
+}

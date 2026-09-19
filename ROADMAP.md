@@ -64,11 +64,15 @@ M4 uses the current M2 discovery and relay services only as replaceable scaffold
 
 M5 is a reference-implementation runtime boundary, not a wire-protocol change. It continues to use M2 bootstrap/relay scaffolding and M4 swarm mechanics. OS service installers, the M3 discovery design, BitTorrent interoperability and a GUI remain later work.
 
-## M6 — BitTorrent interoperability research
-- magnet/infohash mapping
-- import/export semantics
-- optional compatibility layer
-- explicit separation from TripTorrent privacy guarantees
+## M6 — BitTorrent interoperability research (completed)
+- [x] namespaced v1, v2, hybrid and TripTorrent identity mapping
+- [x] strict `.torrent` and magnet import/export semantics
+- [x] discovery, transfer, downgrade and threat matrices
+- [x] optional dual-network adapter and bridge boundaries
+- [x] deterministic offline interoperability vectors
+- [x] explicit separation from TripTorrent privacy guarantees
+
+M6 selects an import-first design with verified BitTorrent aliases and an optional, isolated classic adapter. TripTorrent-only transfers fail closed; importing classic metadata never enables classic networking. This is a research architecture and parser/vector prototype, not production tracker, DHT, peer-protocol, bridge or dual-network support.
 
 ## M7 — Reference desktop client
 - add content
