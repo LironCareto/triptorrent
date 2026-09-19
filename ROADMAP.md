@@ -11,13 +11,15 @@ TripTorrent is currently in design/pre-alpha.
 - CI
 - initial protocol terminology
 
-## M1 — Minimal private transfer
-- two peers
-- one relay
-- encrypted session
-- chunked transfer
-- integrity verification
-- no direct peer-to-peer endpoint exposure between the two peers
+## M1 — Minimal relayed transfer (implemented prototype)
+- [x] two peers
+- [x] one local relay
+- [x] end-to-end encrypted session with a pre-shared key
+- [x] deterministic chunked transfer
+- [x] chunk and complete-content integrity verification
+- [x] no direct peer-to-peer connection between the two peers
+
+M1 validates the executable vertical slice only. Its content IDs, wire format, route registration, key distribution and session setup are experimental rather than normative. It makes no anonymity claim: the relay and network observers still learn connection metadata, timing and traffic volume.
 
 ## M2 — Multi-node overlay
 - peer discovery

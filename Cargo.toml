@@ -1,14 +1,28 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/triptorrent-cli",
     "crates/triptorrent-core",
+    "crates/triptorrent-net",
     "crates/triptorrent-protocol",
+    "crates/triptorrent-relay",
 ]
 
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/LironCareto/triptorrent"
+
+[workspace.dependencies]
+anyhow = "1.0"
+blake3 = "1.8"
+clap = { version = "4.5", features = ["derive"] }
+hex = "0.4"
+postcard = { version = "1.1", features = ["alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+snow = "0.10"
+tempfile = "3.22"
+thiserror = "2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

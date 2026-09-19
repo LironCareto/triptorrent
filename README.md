@@ -14,6 +14,21 @@ The conceptual relationship is closer to **Kademlia relative to eD2k** than to â
 
 There is no stable wire protocol yet and there are currently **no security or anonymity guarantees**. Do not rely on TripTorrent for privacy-sensitive use until the threat model, protocol, independent review and interoperability tests are substantially more mature.
 
+## Current prototype
+
+M1 demonstrates a local, single-relay transfer: two peers establish an end-to-end Noise session using a pre-shared key, the receiver requests a BLAKE3 content ID, and verified chunks travel only through the relay. The relay sees route identifiers, connection metadata, timing, sizes and encrypted frames, but it does not receive the session key or file plaintext.
+
+The content-ID format, 32 KiB chunking, wire messages, route setup and key distribution are experimental. This prototype does not provide anonymity, discovery, traffic-analysis resistance, multi-hop routing, BitTorrent compatibility or production hardening.
+
+Build with `cargo build --workspace`, then run the demo in three terminals. Replace `<CONTENT_ID>` with the output from `id`; the sample key is only suitable for a local demonstration.
+
+```bash
+cargo run -p triptorrent-cli -- relay --listen 127.0.0.1:7000
+cargo run -p triptorrent-cli -- id ./source.bin
+cargo run -p triptorrent-cli -- share --relay 127.0.0.1:7000 --route demo --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f --file ./source.bin
+cargo run -p triptorrent-cli -- fetch --relay 127.0.0.1:7000 --route demo --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f --content <CONTENT_ID> --output ./received.bin
+```
+
 ## Compatibility with the BitTorrent ecosystem
 
 TripTorrent is intended to **revitalize BitTorrent, not abandon its ecosystem**.
