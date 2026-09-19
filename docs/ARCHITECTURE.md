@@ -99,3 +99,11 @@ The receiver first obtains and compares manifests from connected providers. The 
 Resume uses `<output>.triptorrent-part` plus a Postcard-encoded `<output>.triptorrent-state`. The state contains a format version, the exact manifest and completion bits. On restart, every claimed completed chunk is reread and verified before reuse. Successful completion renames the partial file and removes metadata. This is download state, not the persistent node storage planned for M5.
 
 Download and upload limits use deterministic leaky-bucket reservations measured in bytes per second. Omitted or zero limits are unlimited. Scheduling is bounded by eight provider sessions; there is no tit-for-tat, choking, global reputation or long-lived provider score.
+
+## M5 persistent node runtime
+
+M5 adds `triptorrent-node` as an implementation layer above the existing network crates. It owns persistent configuration, a versioned SQLite metadata index, managed content files, transfer recovery, worker lifecycle, structured observability and a versioned loopback HTTP+JSON API. A small `TransferEngine` interface keeps M4 execution outside the node state machine.
+
+`triptorrent-cli` supplies the current M4 adapter and acts as a client of the local API for persistent operations. Command parsing does not own daemon state, storage or API routing. A future GUI can call the same API without embedding CLI behavior.
+
+At startup the node verifies indexed bytes and manifests, disables sharing for missing or corrupt entries, converts stale `running` downloads to `interrupted`, resumes those downloads from M4's verified partial files, and starts new advertisements for valid shared content. Relay routes, connections and protocol peer keys remain ephemeral and are rebuilt. See [ADR 0006](adr/0006-m5-persistent-node.md) for the boundary and [the M5 guide](M5_PERSISTENT_NODE.md) for operational details.

@@ -1,0 +1,26 @@
+[package]
+name = "triptorrent-node"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Persistent TripTorrent node runtime, storage, and local API"
+
+[dependencies]
+anyhow.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+postcard.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+triptorrent-core = { path = "../triptorrent-core" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

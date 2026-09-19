@@ -7,7 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use triptorrent_core::{CHUNK_SIZE, Chunk, ContentId, Manifest, PeerId};
@@ -204,6 +204,20 @@ pub fn share_file_via_overlay_with_options(
     path: &Path,
     options: &ShareOptions,
 ) -> Result<ContentId> {
+    share_file_via_overlay_with_control(bootstrap, path, options, None)
+}
+
+/// Serves one M4 transfer while `keep_running` remains true.
+///
+/// # Errors
+///
+/// Returns an error for cancellation, file, bootstrap, relay, session, or transfer failures.
+pub fn share_file_via_overlay_with_control(
+    bootstrap: SocketAddr,
+    path: &Path,
+    options: &ShareOptions,
+    keep_running: Option<&AtomicBool>,
+) -> Result<ContentId> {
     let (manifest, chunks) = load_content(path)?;
     let content_id = manifest.content_id;
     let availability = parse_availability(options.availability.as_deref(), chunks.len())?;
@@ -225,8 +239,17 @@ pub fn share_file_via_overlay_with_options(
     let mut idle_polls = 0_usize;
 
     loop {
+        if keep_running.is_some_and(|flag| !flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            bail!("sharing stopped");
+        }
         let assignment = poll_until_assignment(
-            || Ok(client.poll_peer(advertisement.peer_id)?),
+            || {
+                if keep_running.is_some_and(|flag| !flag.load(std::sync::atomic::Ordering::Relaxed))
+                {
+                    bail!("sharing stopped");
+                }
+                Ok(client.poll_peer(advertisement.peer_id)?)
+            },
             || {
                 idle_polls = idle_polls.saturating_add(1);
                 if idle_marker_after == Some(idle_polls) {
@@ -257,6 +280,7 @@ pub fn share_file_via_overlay_with_options(
             chunk_delay,
             limiter: limiter.as_ref(),
             peer_id: advertisement.peer_id,
+            keep_running,
         };
         serve_swarm_session(&mut session, &content)?;
         return Ok(content_id);
@@ -271,6 +295,7 @@ struct ProviderContent<'a> {
     chunk_delay: Duration,
     limiter: Option<&'a RuntimeLimiter>,
     peer_id: PeerId,
+    keep_running: Option<&'a AtomicBool>,
 }
 
 fn serve_swarm_session(
@@ -296,6 +321,12 @@ fn serve_swarm_session(
     })?;
 
     loop {
+        if content
+            .keep_running
+            .is_some_and(|flag| !flag.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            bail!("sharing stopped");
+        }
         match session.receive()? {
             Message::ChunkRequest { index } if content.availability.contains(index) => {
                 let chunk_index = usize::try_from(index).context("invalid chunk index")?;

@@ -54,3 +54,7 @@ The receiver sends `ChunkRequest { index }` and the provider returns either the 
 A receiver compares all connected provider manifests byte-for-byte and fails closed on disagreement. It may issue requests concurrently on independent sessions, but must bound concurrency, avoid unnecessary duplicates and retry failed work only from providers claiming that index. Availability is session data and must not be published as part of the future M3 DHT record.
 
 The current resume files and bandwidth-limit algorithm are local implementation details, not wire protocol. No M4 message is stable or normative; see [RFC 0003](../rfcs/0003-m4-swarm-transfer.md).
+
+## M5 implementation boundary
+
+The persistent node, SQLite schema, managed directory layout, TOML configuration, structured logs and `/v1` loopback control API are reference-implementation behavior. M5 changes no TripTorrent wire message, discovery record or peer-identity rule. In particular, restarting a local node creates fresh ephemeral M2 advertisements and routes rather than restoring network sessions or introducing a durable protocol identity.

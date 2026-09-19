@@ -1,12 +1,19 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use serde_json::{Value, json};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
 use triptorrent_cli::{
     FetchOptions, ShareOptions, fetch_file, fetch_file_via_overlay_with_options, identify,
-    parse_psk, share_file, share_file_via_overlay_with_options,
+    parse_psk, share_file, share_file_via_overlay_with_control,
+    share_file_via_overlay_with_options,
+};
+use triptorrent_node::{
+    ConfigOverrides, NodeConfig, PersistentFetchStats, TransferEngine, api_request, run_daemon,
 };
 use triptorrent_overlay::BootstrapClient;
 use triptorrent_protocol::RelayAdvertisement;
@@ -93,6 +100,122 @@ enum Command {
         #[arg(long)]
         download_limit: Option<u64>,
     },
+    /// Manage the persistent M5 node process.
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
+    /// Manage content in the persistent node.
+    Content {
+        #[command(subcommand)]
+        command: ContentCommand,
+    },
+    /// Inspect persistent transfers.
+    Transfer {
+        #[command(subcommand)]
+        command: TransferCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum NodeCommand {
+    /// Create a local node configuration with a fresh API token.
+    Init {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+        #[arg(long, default_value = "triptorrent-data")]
+        data_dir: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:7331")]
+        api_listen: SocketAddr,
+        #[arg(long)]
+        bootstrap: Option<SocketAddr>,
+    },
+    /// Run the persistent node in the foreground.
+    Start {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long)]
+        api_listen: Option<SocketAddr>,
+        #[arg(long)]
+        bootstrap: Option<SocketAddr>,
+        #[arg(long)]
+        download_limit: Option<u64>,
+        #[arg(long)]
+        upload_limit: Option<u64>,
+        #[arg(long)]
+        max_concurrent_transfers: Option<usize>,
+        #[arg(long)]
+        log_level: Option<String>,
+    },
+    /// Query persistent node health and counters.
+    Status {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+    },
+    /// Request a clean node shutdown.
+    Stop {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+    },
+    /// Start a persistent download managed by the node.
+    Fetch {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        content: triptorrent_core::ContentId,
+        /// Keep the completed content private instead of advertising it.
+        #[arg(long)]
+        no_share: bool,
+    },
+    /// Show bootstrap and provider diagnostics.
+    Diagnostics {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContentCommand {
+    /// Import a file into managed storage.
+    Add {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+        file: PathBuf,
+        /// Import without advertising the content.
+        #[arg(long)]
+        no_share: bool,
+    },
+    /// List locally indexed content and integrity state.
+    List {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+    },
+    /// Remove content metadata and optionally its managed bytes.
+    Remove {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        content: triptorrent_core::ContentId,
+        #[arg(long)]
+        delete_bytes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TransferCommand {
+    /// List persistent transfer records.
+    List {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+    },
+    /// Inspect one persistent transfer.
+    Show {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+        id: i64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -140,6 +263,184 @@ fn run(command: Command) -> Result<()> {
             &output,
             download_limit,
         )?,
+        Command::Node { command } => run_node(command)?,
+        Command::Content { command } => run_content(command)?,
+        Command::Transfer { command } => run_transfer(command)?,
+    }
+    Ok(())
+}
+
+struct CliTransferEngine;
+
+impl TransferEngine for CliTransferEngine {
+    fn serve_once(
+        &self,
+        bootstrap: SocketAddr,
+        path: &Path,
+        upload_limit: u64,
+        keep_running: &AtomicBool,
+    ) -> Result<()> {
+        share_file_via_overlay_with_control(
+            bootstrap,
+            path,
+            &ShareOptions {
+                availability: None,
+                upload_limit: Some(upload_limit),
+            },
+            Some(keep_running),
+        )?;
+        Ok(())
+    }
+
+    fn fetch(
+        &self,
+        bootstrap: SocketAddr,
+        content_id: triptorrent_core::ContentId,
+        output: &Path,
+        download_limit: u64,
+    ) -> Result<PersistentFetchStats> {
+        let stats = fetch_file_via_overlay_with_options(
+            bootstrap,
+            content_id,
+            output,
+            FetchOptions {
+                download_limit: Some(download_limit),
+            },
+        )?;
+        Ok(PersistentFetchStats {
+            resumed_chunks: stats.resumed_chunks,
+        })
+    }
+}
+
+fn load_node_config(path: &Path, overrides: &ConfigOverrides) -> Result<NodeConfig> {
+    NodeConfig::load(path, overrides)
+}
+
+fn print_json(value: &Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn run_node(command: NodeCommand) -> Result<()> {
+    match command {
+        NodeCommand::Init {
+            config,
+            data_dir,
+            api_listen,
+            bootstrap,
+        } => {
+            let mut node = NodeConfig::initialized(data_dir)?;
+            node.api_listen = api_listen;
+            node.bootstrap = bootstrap;
+            node.create(&config)?;
+            println!("created node configuration {}", config.display());
+        }
+        NodeCommand::Start {
+            config,
+            data_dir,
+            api_listen,
+            bootstrap,
+            download_limit,
+            upload_limit,
+            max_concurrent_transfers,
+            log_level,
+        } => {
+            let config = load_node_config(
+                &config,
+                &ConfigOverrides {
+                    data_dir,
+                    api_listen,
+                    bootstrap,
+                    download_limit,
+                    upload_limit,
+                    max_concurrent_transfers,
+                    log_level,
+                },
+            )?;
+            run_daemon(&config, Arc::new(CliTransferEngine))?;
+        }
+        NodeCommand::Status { config } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_request(&config, "GET", "/v1/status", None)?)?;
+        }
+        NodeCommand::Stop { config } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_request(
+                &config,
+                "POST",
+                "/v1/shutdown",
+                Some(json!({})),
+            )?)?;
+        }
+        NodeCommand::Fetch {
+            config,
+            content,
+            no_share,
+        } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_request(
+                &config,
+                "POST",
+                "/v1/fetches",
+                Some(json!({"content_id": content.to_string(), "shared": !no_share})),
+            )?)?;
+        }
+        NodeCommand::Diagnostics { config } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_request(&config, "GET", "/v1/diagnostics", None)?)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_content(command: ContentCommand) -> Result<()> {
+    match command {
+        ContentCommand::Add {
+            config,
+            file,
+            no_share,
+        } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_request(
+                &config,
+                "POST",
+                "/v1/content",
+                Some(json!({"path": file, "shared": !no_share})),
+            )?)?;
+        }
+        ContentCommand::List { config } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_request(&config, "GET", "/v1/content", None)?)?;
+        }
+        ContentCommand::Remove {
+            config,
+            content,
+            delete_bytes,
+        } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            let target = format!("/v1/content/{content}?delete_bytes={delete_bytes}");
+            print_json(&api_request(&config, "DELETE", &target, None)?)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_transfer(command: TransferCommand) -> Result<()> {
+    match command {
+        TransferCommand::List { config } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_request(&config, "GET", "/v1/transfers", None)?)?;
+        }
+        TransferCommand::Show { config, id } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_request(
+                &config,
+                "GET",
+                &format!("/v1/transfers/{id}"),
+                None,
+            )?)?;
+        }
     }
     Ok(())
 }

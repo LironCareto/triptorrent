@@ -53,12 +53,16 @@ M3 recommends capability-derived DHT keys, encrypted signed rendezvous records, 
 
 M4 uses the current M2 discovery and relay services only as replaceable scaffolding. It does not implement the M3 DHT/OHTTP research direction, persistent-node storage or a global reputation system.
 
-## M5 — Persistent node
-- daemon
-- local API
-- storage/index
-- configuration
-- observability
+## M5 — Persistent node (implemented prototype)
+- [x] long-running daemon with concurrent provider and download workers
+- [x] versioned loopback HTTP+JSON control API with bearer-token mutations
+- [x] managed content-addressed files and versioned transactional SQLite index
+- [x] TOML configuration with CLI, environment, file and default precedence
+- [x] structured logs, health/status counters and diagnostics
+- [x] restart recovery for indexed sharing and verified partial downloads
+- [x] Windows-safe process-level daemon acceptance tests
+
+M5 is a reference-implementation runtime boundary, not a wire-protocol change. It continues to use M2 bootstrap/relay scaffolding and M4 swarm mechanics. OS service installers, the M3 discovery design, BitTorrent interoperability and a GUI remain later work.
 
 ## M6 — BitTorrent interoperability research
 - magnet/infohash mapping

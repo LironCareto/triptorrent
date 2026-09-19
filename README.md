@@ -16,7 +16,29 @@ There is no stable wire protocol yet and there are currently **no security or an
 
 ## Current prototype
 
-M4 swarm transfer is implemented. A receiver discovers several providers through the temporary M2 bootstrap, opens an independent encrypted relay session to each, schedules verified 32 KiB chunks concurrently, retries failed or corrupt work, and resumes from validated local partial state. [RFC 0003](rfcs/0003-m4-swarm-transfer.md) and [ADR 0005](docs/adr/0005-m4-swarm-transfer.md) describe the experimental design.
+M5 adds a persistent reference node around the M4 transfer engine. The `triptorrent-node` crate owns the daemon lifecycle, SQLite index, managed content store, recovery state and versioned loopback HTTP API. The CLI remains a front-end to that API, which also gives a future GUI a stable local boundary. [ADR 0006](docs/adr/0006-m5-persistent-node.md) and the [M5 node guide](docs/M5_PERSISTENT_NODE.md) describe the implementation.
+
+Initialize and start a node after starting the temporary bootstrap and relays shown below:
+
+```bash
+triptorrent node init --config triptorrent.toml --data-dir ./data --bootstrap 127.0.0.1:7100
+triptorrent node start --config triptorrent.toml
+```
+
+From another shell, persistent operations go through the local API:
+
+```bash
+triptorrent node status --config triptorrent.toml
+triptorrent content add --config triptorrent.toml ./source.bin
+triptorrent content list --config triptorrent.toml
+triptorrent node fetch --config triptorrent.toml --content <CONTENT_ID>
+triptorrent transfer list --config triptorrent.toml
+triptorrent node stop --config triptorrent.toml
+```
+
+Imports are copied into content-addressed managed storage. Indexed content, completed downloads and verified M4 partial state survive restart; shared content is advertised again with fresh ephemeral protocol identity and routes. The API binds to loopback and requires its generated bearer token for changes. See the node guide for config precedence, storage layout, API routes and limitations.
+
+M4 swarm transfer remains the network data path. A receiver discovers several providers through the temporary M2 bootstrap, opens an independent encrypted relay session to each, schedules verified 32 KiB chunks concurrently, retries failed or corrupt work, and resumes from validated local partial state. [RFC 0003](rfcs/0003-m4-swarm-transfer.md) and [ADR 0005](docs/adr/0005-m4-swarm-transfer.md) describe the experimental design.
 
 The current executable retains M2 discovery as scaffolding rather than implementing the M3 DHT/OHTTP research architecture. Peers advertise experimental content IDs under short leases, and the bootstrap now returns routes to several providers. The receiver needs only the bootstrap address and content ID; every provider/receiver session still travels exclusively through a relay.
 
@@ -50,7 +72,7 @@ Manual M1 `--relay`, `--route` and `--key` commands remain available for regress
 
 ## Testing
 
-`cargo test --workspace` is the complete milestone validation, including real CLI child-process tests for multi-source transfer, partial availability, provider failure, malicious chunks, resume and simultaneous swarms. Manual multi-terminal demos are optional debugging tools rather than acceptance requirements.
+`cargo test --workspace` is the complete milestone validation. It includes real child-process tests for the CLI, daemon/API lifecycle, persistent storage, restart recovery, multi-source transfer, resume, serving after restart and simultaneous upload/download. Manual multi-terminal demos are optional debugging tools rather than acceptance requirements.
 
 ## Compatibility with the BitTorrent ecosystem
 
@@ -114,6 +136,7 @@ Protocol changes that affect interoperability should be documented before they b
 - [Architecture](docs/ARCHITECTURE.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [M3 discovery research](docs/M3_DISCOVERY_RESEARCH.md)
+- [M5 persistent node](docs/M5_PERSISTENT_NODE.md)
 - [Design principles](docs/DESIGN_PRINCIPLES.md)
 - [Roadmap](ROADMAP.md)
 - [Protocol specification](spec/README.md)

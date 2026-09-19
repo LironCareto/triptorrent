@@ -4,6 +4,7 @@ members = [
     "crates/triptorrent-cli",
     "crates/triptorrent-core",
     "crates/triptorrent-net",
+    "crates/triptorrent-node",
     "crates/triptorrent-overlay",
     "crates/triptorrent-protocol",
     "crates/triptorrent-relay",
@@ -19,12 +20,18 @@ repository = "https://github.com/LironCareto/triptorrent"
 anyhow = "1.0"
 blake3 = "1.8"
 clap = { version = "4.5", features = ["derive"] }
+getrandom = "0.3"
 hex = "0.4"
 postcard = { version = "1.1", features = ["alloc"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 snow = "0.10"
 tempfile = "3.22"
 thiserror = "2.0"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

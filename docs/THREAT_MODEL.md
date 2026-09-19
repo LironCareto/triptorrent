@@ -70,6 +70,14 @@ M4 verifies each received chunk against one agreed manifest and verifies the com
 
 Using several sources broadens metadata exposure. The M2 bootstrap sees the full provider set and every route assignment. Each selected relay sees the endpoint pair, route, timing, frame sizes and duration for its session. Providers learn the requested content and requested chunk indices; availability bitfields reveal which pieces each provider holds to the receiver. Noise continues to hide application plaintext from a non-colluding relay, but traffic volume and piece-sized timing remain observable. M4 introduces no new anonymity claim and does not implement the M3 discovery architecture.
 
+## M5 local control and storage
+
+The M5 API listens only on an IP address that the implementation verifies is loopback. State-changing requests require a generated bearer token stored in the TOML configuration. Loopback and a bearer token reduce accidental or cross-process control; they are not strong isolation from other code running as the same user, local malware, debuggers or a compromised account. The API is not designed for Internet exposure and has no TLS or multi-user authorization model.
+
+Imported files are copied into managed storage and verified before indexing. Startup and listing revalidate each managed file against its stored manifest and content ID; missing or corrupt entries are no longer advertised. Explicit byte deletion is restricted to managed content directories and never deletes the original import path. The SQLite database and bearer token remain sensitive local assets and depend on host filesystem protections and backups.
+
+Structured logs omit API tokens and cryptographic key material, but normal logs contain content IDs, transfer outcomes, local paths and API addresses. Debug output from the transfer stack can also contain peer, route and timing metadata. Logs must therefore be treated as privacy-sensitive operational data. Persistence does not create a durable protocol peer identity or improve M2/M4 anonymity properties.
+
 ## Security rule
 
 No protocol component should make an anonymity claim stronger than what the threat model and implementation can support.
