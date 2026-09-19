@@ -73,4 +73,19 @@ Peer and relay entries disappear when their leases expire. Re-registering replac
 
 The provider's ephemeral key removes the manual M1 PSK from the M2 CLI without creating a key-distribution construction. It authenticates possession of the advertised provider key, but the bootstrap advertisement itself is unauthenticated. A malicious bootstrap can substitute a public key and mediate sessions. There is no durable or production peer identity.
 
-The bootstrap is deliberately temporary and centralized. Its control connection and Postcard messages are experimental implementation scaffolding expected to be replaced or substantially reworked during M3. It is not a normative dependency or a claim of decentralized discovery.
+The bootstrap is deliberately temporary and centralized. Its control connection and Postcard messages are experimental implementation scaffolding expected to be replaced or substantially reworked by a later discovery prototype. It is not a normative dependency or a claim of decentralized discovery.
+
+## M3 discovery research direction
+
+M3 keeps discovery, rendezvous and transfer as separate layers. The selected prototype direction is:
+
+1. A content link carries a random discovery capability separately from the content ID.
+2. A domain-separated capability-derived key addresses encrypted, signed and expiring provider descriptors in a Kademlia-style DHT.
+3. Publication and lookup traverse independently selected oblivious relays and gateways. A relay sees the client endpoint and encrypted request; a gateway sees the DHT operation and relay endpoint.
+4. Records and queries use network-prefix diversity and multiple independent paths to reduce one target-key cluster's influence.
+5. Decrypted descriptors yield opaque rendezvous tokens and relay candidates. Rendezvous coordinates the existing M1 encrypted transfer without placing file data in discovery.
+6. Cached peers, user contacts, peer exchange and independent seeds populate routing tables only. Seeds do not perform content lookups.
+
+This direction removes the mandatory M2 service that sees the complete requester/content/provider mapping under a non-collusion assumption. It does not hide stable derived keys from DHT nodes, both transfer endpoints from their selected relay, or timing from broad observers. A public discovery capability permits observers holding it to recognize the lookup namespace.
+
+The no-I/O M3 model lives in `triptorrent-overlay::research`; no production DHT, OHTTP transport or rendezvous protocol has been implemented. [RFC 0002](../rfcs/0002-separated-multi-stage-discovery.md) defines the next experiment, and [the M3 report](M3_DISCOVERY_RESEARCH.md) contains the evidence and unresolved questions.

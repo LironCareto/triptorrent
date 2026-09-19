@@ -35,4 +35,10 @@ M2 currently uses a non-normative, versioned Postcard request/response protocol 
 
 Responses acknowledge a server-controlled lease or return an optional route assignment. An assignment contains the provider ID and public key, selected relay ID and address, and an automatically generated route ID. Registrations and queued routes expire according to the bootstrap's monotonic lease clock.
 
-These messages are prototype scaffolding, are not authenticated, and are not the normative TripTorrent discovery protocol. Their current encoding and semantics may be removed or replaced during M3.
+These messages are prototype scaffolding, are not authenticated, and are not the normative TripTorrent discovery protocol. Their current encoding and semantics may be removed or replaced by a later discovery prototype.
+
+## Experimental M3 discovery direction
+
+M3 research recommends capability-derived DHT keys, encrypted signed provider descriptors, oblivious relay/gateway publication and lookup, diverse replicas, independent paths and opaque rendezvous tokens. [RFC 0002](../rfcs/0002-separated-multi-stage-discovery.md) defines the next prototype direction.
+
+No M3 wire encoding is normative or implemented. The content ID and discovery capability must remain separate, and private discovery must not silently fall back to direct transfer or the public BitTorrent DHT. Exact key derivation, descriptor encoding, cryptographic suites, routing RPCs, expiry and rendezvous state machines require test vectors and specification before interoperability claims.

@@ -1,4 +1,6 @@
-#![doc = "Temporary M2 bootstrap, discovery, lease, and simulation support."]
+#![doc = "Temporary M2 overlay and deterministic M3 discovery research support."]
+
+pub mod research;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, Read, Write};

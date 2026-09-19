@@ -46,7 +46,23 @@ The temporary M2 bootstrap directly observes:
 
 The bootstrap protocol is neither encrypted nor authenticated beyond local TCP assumptions. Registrations and relay-failure reports can be spoofed, overwritten or used for denial of service. The bootstrap distributes provider public keys but there is no durable identity or independent binding for them, so a malicious bootstrap can substitute keys and mediate a transfer. An honest relay alone still receives opaque Noise frames rather than file plaintext, but collusion and traffic correlation remain unresolved.
 
-Peers reveal their network address to the bootstrap and selected relay. They do not open direct sockets to each other. Network observers can correlate bootstrap activity with subsequent relay connections by timing and volume. M2 makes no anonymity, unlinkability, Sybil-resistance or malicious-bootstrap-resistance claim; these questions are explicitly deferred to M3.
+Peers reveal their network address to the bootstrap and selected relay. They do not open direct sockets to each other. Network observers can correlate bootstrap activity with subsequent relay connections by timing and volume. M2 makes no anonymity, unlinkability, Sybil-resistance or malicious-bootstrap-resistance claim; these questions were deferred to M3 research.
+
+## M3 discovery research findings
+
+M3's recommended prototype separates discovery roles so that, without collusion:
+
+- a query relay sees the requester endpoint but not the HPKE-protected lookup;
+- a query gateway and queried DHT nodes see a capability-derived key but not the requester endpoint;
+- DHT storage nodes see an encrypted descriptor rather than a raw content ID, provider endpoint or relay choice;
+- bootstrap seeds see join traffic but receive no content lookup;
+- a transfer relay still sees both transfer endpoints, route token, timing and volume.
+
+These properties depend on the secrecy of the discovery capability and on query relay/gateway non-collusion. DHT nodes can link repeated use of the same derived key. Public capabilities permit recognition by anyone holding the link. Malicious gateways can censor results, target-key Sybils can occupy routing and storage positions, and prefix diversity is ineffective against an attacker with enough network origins. Signed records prevent undetected modification but do not prevent withholding, malicious providers or false relay advertisements.
+
+Local and transit observers can correlate discovery and transfer timing. A colluding query relay and gateway recover requester endpoint plus lookup key; collusion with storage or transfer roles may add provider or content associations. A large passive observer remains outside the protection claim. No padding, cover traffic, PIR, production identity cost or onion routing is implemented.
+
+The deterministic M3 model found that three diverse lookup paths improved availability under its malicious-node and concentrated-Sybil scenarios, but increased control traffic and the number of nodes seeing the derived key. These comparative results are not an Internet-scale security estimate. See [M3 Discovery Research](M3_DISCOVERY_RESEARCH.md) for assumptions, matrices and measurements.
 
 ## Security rule
 

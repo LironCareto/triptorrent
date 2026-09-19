@@ -16,7 +16,9 @@ There is no stable wire protocol yet and there are currently **no security or an
 
 ## Current prototype
 
-M2 extends the encrypted M1 transfer into a local multi-node overlay. Peers advertise experimental content IDs under short leases, relays advertise availability, and a temporary bootstrap selects a provider and relay and creates an automatic route. The receiver needs only the bootstrap address and content ID; peers still connect exclusively through a relay.
+M3 research is complete and recommends that the next prototype test capability-keyed Kademlia records, oblivious relay/gateway lookup paths, diverse replication and separate rendezvous coordination. The [research report](docs/M3_DISCOVERY_RESEARCH.md), [RFC 0002](rfcs/0002-separated-multi-stage-discovery.md) and [ADR 0004](docs/adr/0004-m3-separated-discovery-research.md) state the assumptions and limits. M3 does not implement a production DHT or establish an anonymity guarantee.
+
+The current executable remains M2. It extends the encrypted M1 transfer into a local multi-node overlay. Peers advertise experimental content IDs under short leases, relays advertise availability, and a temporary bootstrap selects a provider and relay and creates an automatic route. The receiver needs only the bootstrap address and content ID; peers still connect exclusively through a relay.
 
 The bootstrap is a prototype rendezvous service, not the final decentralized discovery design. It observes peer IP addresses, ephemeral peer IDs and public keys, content advertisements and queries, relay endpoints, selected routes, timing and churn. It can substitute advertised keys because M2 has no durable identity or authenticated bootstrap protocol. M2 therefore provides no anonymity guarantee and must not be used for privacy-sensitive transfers.
 
@@ -36,7 +38,13 @@ cargo run -p triptorrent-cli -- share --bootstrap 127.0.0.1:7100 --file ./source
 cargo run -p triptorrent-cli -- fetch --bootstrap 127.0.0.1:7100 --content <CONTENT_ID> --output ./received.bin
 ```
 
-The content-ID format, chunking, overlay messages, leases, ephemeral identities, bootstrap, selection policy and Noise pattern remain experimental. M2 does not implement a DHT, multi-hop routing, traffic-analysis resistance, BitTorrent compatibility, NAT traversal or production hardening. Manual M1 `--relay`, `--route` and `--key` commands remain available for regression testing.
+The content-ID format, chunking, overlay messages, leases, ephemeral identities, bootstrap, selection policy and Noise pattern remain experimental. M2 does not implement a DHT, multi-hop routing, traffic-analysis resistance, BitTorrent compatibility, NAT traversal or production hardening. M3 adds only deterministic no-I/O discovery research tooling:
+
+```bash
+cargo run -p triptorrent-overlay --example m3_discovery_simulation
+```
+
+Manual M1 `--relay`, `--route` and `--key` commands remain available for regression testing.
 
 ## Compatibility with the BitTorrent ecosystem
 
@@ -99,6 +107,7 @@ Protocol changes that affect interoperability should be documented before they b
 - [Vision](docs/VISION.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Threat model](docs/THREAT_MODEL.md)
+- [M3 discovery research](docs/M3_DISCOVERY_RESEARCH.md)
 - [Design principles](docs/DESIGN_PRINCIPLES.md)
 - [Roadmap](ROADMAP.md)
 - [Protocol specification](spec/README.md)

@@ -30,13 +30,17 @@ M1 validates the executable vertical slice only. Its content IDs, wire format, r
 - [x] deterministic 10-peer/3-relay simulation harness
 - [x] discovery-driven encrypted M1 transfer
 
-M2 proves local overlay mechanics only. The centralized bootstrap, control messages, ephemeral peer identifiers, lease values and selection policy are experimental. Anonymous and decentralized discovery remain M3 research topics.
+M2 proves local overlay mechanics only. The centralized bootstrap, control messages, ephemeral peer identifiers, lease values and selection policy are experimental. Anonymous and decentralized discovery were deferred to M3 research.
 
-## M3 — Anonymous discovery research
-- DHT/overlay candidate evaluation
-- metadata leakage analysis
-- eclipse/Sybil analysis
-- bootstrap strategy
+## M3 — Anonymous discovery research (completed)
+- [x] Kademlia and alternative overlay candidate evaluation
+- [x] per-role metadata leakage model and explicit privacy metrics
+- [x] deterministic 100/1,000-node churn, malicious-node and target-Sybil simulation
+- [x] eclipse/Sybil mitigations and limitations
+- [x] non-authoritative bootstrap strategy
+- [x] RFC and ADR selecting separated multi-stage discovery for the next prototype
+
+M3 recommends capability-derived DHT keys, encrypted signed rendezvous records, oblivious relay/gateway paths, diverse replication and separate M1 relay coordination. This is a research decision, not a production DHT or anonymity guarantee. OHTTP role separation, descriptor formats and randomized attacker-prefix experiments must be validated before replacing M2.
 
 ## M4 — Swarm transfer
 - multiple sources
