@@ -14,6 +14,8 @@ use triptorrent_protocol::{Message, PeerAdvertisement, PeerCapability, RouteAssi
 const OVERLAY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OVERLAY_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 const FETCH_MAX_DISCOVERY_ATTEMPTS: usize = 600;
+const TEST_POLL_INTERVAL_ENV: &str = "TRIPTORRENT_TEST_OVERLAY_POLL_MS";
+const TEST_IDLE_MARKER_ENV: &str = "TRIPTORRENT_TEST_IDLE_MARKER_AFTER";
 
 /// Computes the experimental content ID of a local file.
 ///
@@ -159,11 +161,20 @@ pub fn share_file_via_overlay(bootstrap: SocketAddr, path: &Path) -> Result<Cont
     };
     let client = BootstrapClient::new(bootstrap);
     client.register_peer(advertisement.clone())?;
+    let poll_interval = overlay_poll_interval();
+    let idle_marker_after = test_idle_marker_after();
+    let mut idle_polls = 0_usize;
 
     loop {
         let assignment = poll_until_assignment(
             || Ok(client.poll_peer(advertisement.peer_id)?),
-            || thread::sleep(OVERLAY_POLL_INTERVAL),
+            || {
+                idle_polls = idle_polls.saturating_add(1);
+                if idle_marker_after == Some(idle_polls) {
+                    eprintln!("TRIPTORRENT_TEST_IDLE_POLLS_REACHED={idle_polls}");
+                }
+                thread::sleep(poll_interval);
+            },
         )?;
         let relay = assignment
             .relay_address
@@ -207,10 +218,11 @@ pub fn fetch_file_via_overlay(
     output: &Path,
 ) -> Result<()> {
     let client = BootstrapClient::new(bootstrap);
+    let poll_interval = overlay_poll_interval();
     let mut last_error = None;
     for _ in 0..FETCH_MAX_DISCOVERY_ATTEMPTS {
         let Some(assignment) = client.discover(content_id)? else {
-            thread::sleep(OVERLAY_POLL_INTERVAL);
+            thread::sleep(poll_interval);
             continue;
         };
         let relay = assignment
@@ -227,7 +239,7 @@ pub fn fetch_file_via_overlay(
             Err(error) => {
                 let _ = client.report_relay_failure(&assignment.relay_id);
                 last_error = Some(anyhow::Error::new(error));
-                thread::sleep(OVERLAY_POLL_INTERVAL);
+                thread::sleep(poll_interval);
                 continue;
             }
         };
@@ -239,6 +251,19 @@ pub fn fetch_file_via_overlay(
         return Err(error.context("all discovered overlay routes failed"));
     }
     bail!("content was not discoverable before the local timeout")
+}
+
+fn overlay_poll_interval() -> Duration {
+    std::env::var(TEST_POLL_INTERVAL_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(OVERLAY_POLL_INTERVAL, Duration::from_millis)
+}
+
+fn test_idle_marker_after() -> Option<usize> {
+    std::env::var(TEST_IDLE_MARKER_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
 }
 
 /// Parses a 32-byte hexadecimal pre-shared session key.
