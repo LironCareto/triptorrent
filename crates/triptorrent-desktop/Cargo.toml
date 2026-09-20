@@ -1,0 +1,23 @@
+[package]
+name = "triptorrent-desktop"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native graphical reference client for the persistent TripTorrent node"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+eframe.workspace = true
+triptorrent-node-api = { path = "../triptorrent-node-api" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "triptorrent-desktop"
+path = "src/main.rs"

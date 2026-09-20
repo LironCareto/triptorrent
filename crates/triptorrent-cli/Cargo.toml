@@ -16,6 +16,7 @@ serde_json.workspace = true
 triptorrent-core = { path = "../triptorrent-core" }
 triptorrent-net = { path = "../triptorrent-net" }
 triptorrent-node = { path = "../triptorrent-node" }
+triptorrent-node-api = { path = "../triptorrent-node-api" }
 triptorrent-overlay = { path = "../triptorrent-overlay" }
 triptorrent-protocol = { path = "../triptorrent-protocol" }
 triptorrent-relay = { path = "../triptorrent-relay" }
@@ -23,6 +24,8 @@ triptorrent-swarm = { path = "../triptorrent-swarm" }
 
 [dev-dependencies]
 tempfile.workspace = true
+triptorrent-desktop = { path = "../triptorrent-desktop" }
+triptorrent-node-api = { path = "../triptorrent-node-api" }
 
 [lints]
 workspace = true

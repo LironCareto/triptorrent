@@ -18,6 +18,8 @@ triptorrent content list --config triptorrent.toml
 triptorrent node fetch --config triptorrent.toml --content <CONTENT_ID>
 triptorrent transfer list --config triptorrent.toml
 triptorrent transfer show --config triptorrent.toml <ID>
+triptorrent transfer pause --config triptorrent.toml <ID>
+triptorrent transfer resume --config triptorrent.toml <ID>
 triptorrent content remove --config triptorrent.toml --content <CONTENT_ID>
 triptorrent content remove --config triptorrent.toml --content <CONTENT_ID> --delete-bytes
 triptorrent node diagnostics --config triptorrent.toml
@@ -46,7 +48,10 @@ The HTTP+JSON API is an implementation control interface, separate from TripTorr
 | POST | `/v1/fetches` | Start a persistent fetch |
 | GET | `/v1/transfers` | List transfers |
 | GET | `/v1/transfers/{id}` | Inspect one transfer |
+| POST | `/v1/transfers/{id}/pause` | Cooperatively pause a running download |
+| POST | `/v1/transfers/{id}/resume` | Resume a paused download from verified state |
 | GET | `/v1/diagnostics` | Bootstrap and provider-worker state |
+| GET | `/v1/network-privacy` | Structured current path and disclosure status |
 | POST | `/v1/shutdown` | Clean shutdown |
 
 Mutating requests require `Authorization: Bearer <api_token>`. Errors use `{"error":{"code":"...","message":"..."}}`. The daemon rejects non-loopback bind addresses. Loopback plus a token is not protection from hostile software running under the local account; do not expose this API through port forwarding or a public proxy.
@@ -62,9 +67,9 @@ data/
 │   ├── manifest.postcard
 │   ├── data.triptorrent-part       # while downloading
 │   └── data.triptorrent-state      # verified M4 completion bits
-└── state/node.sqlite3              # schema version 1, WAL enabled
+└── state/node.sqlite3              # schema version 2, WAL enabled
 ```
 
-SQLite stores content and transfer metadata, not file blobs. Startup verifies completed bytes and manifests. Missing or corrupt content is marked accordingly and unshared. Stale running transfers become interrupted and restart automatically when bootstrap is configured; M4 rechecks every recorded chunk before reuse. Valid shared content gets a fresh ephemeral advertisement. Connections, relay routes and protocol peer identities are never restored.
+SQLite stores content and transfer metadata, not file blobs. Transfer rows include verified progress, current verified-byte rate, provider/retry/rejection counters and provider contribution. Startup verifies completed bytes and manifests. Missing or corrupt content is marked accordingly and unshared. Stale running transfers become interrupted and restart automatically when bootstrap is configured; explicitly paused transfers remain paused. M4 rechecks every recorded chunk before either recovery or explicit resume. Valid shared content gets a fresh ephemeral advertisement. Connections, relay routes and protocol peer identities are never restored.
 
 Logs are JSON and cover lifecycle, content and transfer outcomes. They omit tokens and key material but can include content IDs, paths, peer/route metadata and timing, so retain them as privacy-sensitive data. OS service packaging, remote administration, transfer cancellation and production migrations are deferred.

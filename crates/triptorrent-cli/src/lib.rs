@@ -185,6 +185,36 @@ pub struct TransferStats {
     pub resumed_chunks: usize,
 }
 
+/// Verified progress emitted by the M4 receiver.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VerifiedTransferProgress {
+    pub bytes_total: u64,
+    pub verified_bytes: u64,
+    pub total_chunks: usize,
+    pub verified_chunks: usize,
+    pub provider_count: usize,
+    pub retry_count: usize,
+    pub rejected_chunks: usize,
+}
+
+/// Cooperative control boundary used by persistent front-ends.
+pub trait FetchMonitor: Send + Sync {
+    /// Return false to stop discovery or chunk scheduling at a safe boundary.
+    fn should_continue(&self) -> bool;
+    /// Receives progress only after local integrity verification succeeds.
+    fn verified_progress(&self, progress: VerifiedTransferProgress);
+}
+
+struct UncontrolledFetch;
+
+impl FetchMonitor for UncontrolledFetch {
+    fn should_continue(&self) -> bool {
+        true
+    }
+
+    fn verified_progress(&self, _progress: VerifiedTransferProgress) {}
+}
+
 /// Advertises and serves one file through an automatically coordinated M4 route.
 ///
 /// # Errors
@@ -406,10 +436,29 @@ pub fn fetch_file_via_overlay_with_options(
     output: &Path,
     options: FetchOptions,
 ) -> Result<TransferStats> {
+    fetch_file_via_overlay_with_monitor(bootstrap, content_id, output, options, &UncontrolledFetch)
+}
+
+/// Runs one cooperatively controlled M4 fetch with verified progress reports.
+///
+/// # Errors
+///
+/// Returns an error for a requested stop or for discovery, relay, session,
+/// manifest, resume, integrity, or file failures.
+pub fn fetch_file_via_overlay_with_monitor(
+    bootstrap: SocketAddr,
+    content_id: ContentId,
+    output: &Path,
+    options: FetchOptions,
+    monitor: &dyn FetchMonitor,
+) -> Result<TransferStats> {
     let client = BootstrapClient::new(bootstrap);
     let poll_interval = overlay_poll_interval();
     let mut last_error = None;
     for _ in 0..FETCH_MAX_DISCOVERY_ATTEMPTS {
+        if !monitor.should_continue() {
+            bail!("fetch stopped by local control");
+        }
         let assignments = client.discover_providers(content_id, MAX_SWARM_PROVIDERS)?;
         if assignments.is_empty() {
             thread::sleep(poll_interval);
@@ -431,7 +480,7 @@ pub fn fetch_file_via_overlay_with_options(
             thread::sleep(poll_interval);
             continue;
         }
-        return receive_swarm(providers, content_id, output, options);
+        return receive_swarm(providers, content_id, output, options, monitor);
     }
     if let Some(error) = last_error {
         return Err(error.context("all discovered overlay routes failed"));
@@ -615,6 +664,7 @@ fn receive_swarm(
     content_id: ContentId,
     output: &Path,
     options: FetchOptions,
+    monitor: &dyn FetchMonitor,
 ) -> Result<TransferStats> {
     let manifest = providers[0].manifest.clone();
     if providers
@@ -624,6 +674,15 @@ fn receive_swarm(
         bail!("providers returned inconsistent manifests");
     }
     let (mut resume, mut partial, resumed_chunks) = ResumeDownload::open(output, &manifest)?;
+    let provider_count = providers.len();
+    report_verified_progress(
+        monitor,
+        &manifest,
+        &resume.record.completed,
+        provider_count,
+        0,
+        0,
+    )?;
     let availability: Vec<_> = providers
         .iter()
         .map(|provider| provider.availability.clone())
@@ -659,6 +718,7 @@ fn receive_swarm(
         &mut resume,
         &mut partial,
         scheduler,
+        monitor,
     )?;
 
     for worker in &mut workers {
@@ -704,8 +764,12 @@ fn download_chunks(
     resume: &mut ResumeDownload,
     partial: &mut File,
     mut scheduler: Scheduler,
+    monitor: &dyn FetchMonitor,
 ) -> Result<Scheduler> {
     while !scheduler.is_complete() {
+        if !monitor.should_continue() {
+            bail!("fetch stopped by local control");
+        }
         let mut assigned = false;
         for (slot, worker) in workers.iter().enumerate() {
             if let Some(index) = scheduler.assign(slot) {
@@ -741,6 +805,14 @@ fn download_chunks(
             {
                 resume.write_verified_chunk(partial, manifest, &chunk)?;
                 scheduler.accept(result.provider, chunk.index)?;
+                report_verified_progress(
+                    monitor,
+                    manifest,
+                    &resume.record.completed,
+                    workers.len(),
+                    scheduler.retries(),
+                    rejected_requests(&scheduler, workers.len()),
+                )?;
                 eprintln!(
                     "TRIPTORRENT_CHUNK_ACCEPTED provider={} index={} resumed=false",
                     workers[result.provider].peer_id, chunk.index
@@ -752,6 +824,14 @@ fn download_chunks(
                     workers[result.provider].peer_id, result.requested_index
                 );
                 scheduler.reject(result.provider);
+                report_verified_progress(
+                    monitor,
+                    manifest,
+                    &resume.record.completed,
+                    workers.len(),
+                    scheduler.retries(),
+                    rejected_requests(&scheduler, workers.len()),
+                )?;
                 if !scheduler.can_finish() {
                     bail!("no honest provider remains for a required chunk");
                 }
@@ -760,6 +840,44 @@ fn download_chunks(
     }
 
     Ok(scheduler)
+}
+
+fn rejected_requests(scheduler: &Scheduler, provider_count: usize) -> usize {
+    (0..provider_count)
+        .filter_map(|slot| scheduler.provider_stats(slot))
+        .map(|stats| stats.rejected)
+        .sum()
+}
+
+fn report_verified_progress(
+    monitor: &dyn FetchMonitor,
+    manifest: &Manifest,
+    completed: &[bool],
+    provider_count: usize,
+    retry_count: usize,
+    rejected_chunks: usize,
+) -> Result<()> {
+    let mut verified_bytes = 0_u64;
+    let mut verified_chunks = 0_usize;
+    for (index, done) in completed.iter().copied().enumerate() {
+        if done {
+            verified_chunks += 1;
+            verified_bytes = verified_bytes.saturating_add(expected_chunk_length(
+                manifest,
+                u32::try_from(index).context("progress chunk index overflow")?,
+            )?);
+        }
+    }
+    monitor.verified_progress(VerifiedTransferProgress {
+        bytes_total: manifest.length,
+        verified_bytes,
+        total_chunks: manifest.chunks.len(),
+        verified_chunks,
+        provider_count,
+        retry_count,
+        rejected_chunks,
+    });
+    Ok(())
 }
 
 fn emit_stats(stats: &TransferStats) {

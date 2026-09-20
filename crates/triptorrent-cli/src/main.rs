@@ -8,13 +8,15 @@ use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
 use triptorrent_cli::{
-    FetchOptions, ShareOptions, fetch_file, fetch_file_via_overlay_with_options, identify,
-    parse_psk, share_file, share_file_via_overlay_with_control,
-    share_file_via_overlay_with_options,
+    FetchMonitor, FetchOptions, ShareOptions, VerifiedTransferProgress, fetch_file,
+    fetch_file_via_overlay_with_monitor, fetch_file_via_overlay_with_options, identify, parse_psk,
+    share_file, share_file_via_overlay_with_control, share_file_via_overlay_with_options,
 };
 use triptorrent_node::{
-    ConfigOverrides, NodeConfig, PersistentFetchStats, TransferEngine, api_request, run_daemon,
+    ConfigOverrides, FetchControl, NodeConfig, PersistentFetchStats, TransferEngine,
+    VerifiedProgress, run_daemon,
 };
+use triptorrent_node_api::{LocalApiClient, ProviderContribution};
 use triptorrent_overlay::BootstrapClient;
 use triptorrent_protocol::RelayAdvertisement;
 
@@ -216,6 +218,18 @@ enum TransferCommand {
         config: PathBuf,
         id: i64,
     },
+    /// Pause a running persistent download at a verified-chunk boundary.
+    Pause {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+        id: i64,
+    },
+    /// Resume an explicitly paused persistent download.
+    Resume {
+        #[arg(long, default_value = "triptorrent.toml")]
+        config: PathBuf,
+        id: i64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -272,6 +286,26 @@ fn run(command: Command) -> Result<()> {
 
 struct CliTransferEngine;
 
+struct NodeFetchMonitor<'a>(&'a FetchControl);
+
+impl FetchMonitor for NodeFetchMonitor<'_> {
+    fn should_continue(&self) -> bool {
+        self.0.should_continue()
+    }
+
+    fn verified_progress(&self, progress: VerifiedTransferProgress) {
+        self.0.report(VerifiedProgress {
+            bytes_total: progress.bytes_total,
+            verified_bytes: progress.verified_bytes,
+            total_chunks: progress.total_chunks,
+            verified_chunks: progress.verified_chunks,
+            provider_count: progress.provider_count,
+            retry_count: progress.retry_count,
+            rejected_chunks: progress.rejected_chunks,
+        });
+    }
+}
+
 impl TransferEngine for CliTransferEngine {
     fn serve_once(
         &self,
@@ -298,17 +332,39 @@ impl TransferEngine for CliTransferEngine {
         content_id: triptorrent_core::ContentId,
         output: &Path,
         download_limit: u64,
+        control: &FetchControl,
     ) -> Result<PersistentFetchStats> {
-        let stats = fetch_file_via_overlay_with_options(
+        let stats = fetch_file_via_overlay_with_monitor(
             bootstrap,
             content_id,
             output,
             FetchOptions {
                 download_limit: Some(download_limit),
             },
+            &NodeFetchMonitor(control),
         )?;
+        let provider_contributions = stats
+            .accepted_by_provider
+            .iter()
+            .map(|(provider, verified_chunks)| ProviderContribution {
+                provider_id: provider.to_string(),
+                verified_chunks: *verified_chunks,
+                rejected_requests: stats
+                    .rejected_by_provider
+                    .iter()
+                    .find_map(|(candidate, rejected)| (candidate == provider).then_some(*rejected))
+                    .unwrap_or(0),
+            })
+            .collect();
         Ok(PersistentFetchStats {
             resumed_chunks: stats.resumed_chunks,
+            provider_contributions,
+            retry_count: stats.retries,
+            rejected_chunks: stats
+                .rejected_by_provider
+                .iter()
+                .map(|(_, rejected)| rejected)
+                .sum(),
         })
     }
 }
@@ -320,6 +376,13 @@ fn load_node_config(path: &Path, overrides: &ConfigOverrides) -> Result<NodeConf
 fn print_json(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn api_client(config: &NodeConfig) -> LocalApiClient {
+    LocalApiClient::new(triptorrent_node_api::LocalApiConnection {
+        api_listen: config.api_listen,
+        api_token: config.api_token.clone(),
+    })
 }
 
 fn run_node(command: NodeCommand) -> Result<()> {
@@ -362,12 +425,11 @@ fn run_node(command: NodeCommand) -> Result<()> {
         }
         NodeCommand::Status { config } => {
             let config = load_node_config(&config, &ConfigOverrides::default())?;
-            print_json(&api_request(&config, "GET", "/v1/status", None)?)?;
+            print_json(&api_client(&config).request_value("GET", "/v1/status", None)?)?;
         }
         NodeCommand::Stop { config } => {
             let config = load_node_config(&config, &ConfigOverrides::default())?;
-            print_json(&api_request(
-                &config,
+            print_json(&api_client(&config).request_value(
                 "POST",
                 "/v1/shutdown",
                 Some(json!({})),
@@ -379,8 +441,7 @@ fn run_node(command: NodeCommand) -> Result<()> {
             no_share,
         } => {
             let config = load_node_config(&config, &ConfigOverrides::default())?;
-            print_json(&api_request(
-                &config,
+            print_json(&api_client(&config).request_value(
                 "POST",
                 "/v1/fetches",
                 Some(json!({"content_id": content.to_string(), "shared": !no_share})),
@@ -388,7 +449,7 @@ fn run_node(command: NodeCommand) -> Result<()> {
         }
         NodeCommand::Diagnostics { config } => {
             let config = load_node_config(&config, &ConfigOverrides::default())?;
-            print_json(&api_request(&config, "GET", "/v1/diagnostics", None)?)?;
+            print_json(&api_client(&config).request_value("GET", "/v1/diagnostics", None)?)?;
         }
     }
     Ok(())
@@ -402,8 +463,7 @@ fn run_content(command: ContentCommand) -> Result<()> {
             no_share,
         } => {
             let config = load_node_config(&config, &ConfigOverrides::default())?;
-            print_json(&api_request(
-                &config,
+            print_json(&api_client(&config).request_value(
                 "POST",
                 "/v1/content",
                 Some(json!({"path": file, "shared": !no_share})),
@@ -411,7 +471,7 @@ fn run_content(command: ContentCommand) -> Result<()> {
         }
         ContentCommand::List { config } => {
             let config = load_node_config(&config, &ConfigOverrides::default())?;
-            print_json(&api_request(&config, "GET", "/v1/content", None)?)?;
+            print_json(&api_client(&config).request_value("GET", "/v1/content", None)?)?;
         }
         ContentCommand::Remove {
             config,
@@ -420,7 +480,7 @@ fn run_content(command: ContentCommand) -> Result<()> {
         } => {
             let config = load_node_config(&config, &ConfigOverrides::default())?;
             let target = format!("/v1/content/{content}?delete_bytes={delete_bytes}");
-            print_json(&api_request(&config, "DELETE", &target, None)?)?;
+            print_json(&api_client(&config).request_value("DELETE", &target, None)?)?;
         }
     }
     Ok(())
@@ -430,16 +490,23 @@ fn run_transfer(command: TransferCommand) -> Result<()> {
     match command {
         TransferCommand::List { config } => {
             let config = load_node_config(&config, &ConfigOverrides::default())?;
-            print_json(&api_request(&config, "GET", "/v1/transfers", None)?)?;
+            print_json(&api_client(&config).request_value("GET", "/v1/transfers", None)?)?;
         }
         TransferCommand::Show { config, id } => {
             let config = load_node_config(&config, &ConfigOverrides::default())?;
-            print_json(&api_request(
-                &config,
+            print_json(&api_client(&config).request_value(
                 "GET",
                 &format!("/v1/transfers/{id}"),
                 None,
             )?)?;
+        }
+        TransferCommand::Pause { config, id } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_client(&config).pause_transfer(id)?)?;
+        }
+        TransferCommand::Resume { config, id } => {
+            let config = load_node_config(&config, &ConfigOverrides::default())?;
+            print_json(&api_client(&config).resume_transfer(id)?)?;
         }
     }
     Ok(())

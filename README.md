@@ -16,6 +16,15 @@ There is no stable wire protocol yet and there are currently **no security or an
 
 ## Current prototype
 
+M7 adds a native reference desktop client built with `egui`/`eframe`. It connects to the persistent node through the same typed, authenticated local API as the CLI, can start the node sidecar, manages the library, starts fetches, shows verified progress, and genuinely pauses/resumes downloads. Build the workspace and launch the two adjacent executables:
+
+```bash
+cargo build --workspace
+target/debug/triptorrent-desktop
+```
+
+The first launch creates a safe per-user configuration without a bootstrap. Local content management remains available; configure a real bootstrap explicitly to enable fetches. Closing the window leaves the persistent node running, and the UI provides an explicit **Stop node** action. See the [M7 desktop guide](docs/M7_DESKTOP_CLIENT.md) and [ADR 0008](docs/adr/0008-m7-local-api-desktop-client.md).
+
 M6 completes BitTorrent interoperability research without adding a production BitTorrent network stack. The selected design keeps TripTorrent content IDs independent, records verified v1/v2 infohashes as typed aliases, and places classic networking behind explicit `triptorrent-only`, dual-network, or classic policies. See the [M6 research report](docs/M6_BITTORRENT_INTEROP_RESEARCH.md), [RFC 0004](rfcs/0004-namespaced-bittorrent-compatibility.md), and [ADR 0007](docs/adr/0007-m6-namespaced-identifiers-and-explicit-compatibility.md).
 
 M5 adds a persistent reference node around the M4 transfer engine. The `triptorrent-node` crate owns the daemon lifecycle, SQLite index, managed content store, recovery state and versioned loopback HTTP API. The CLI remains a front-end to that API, which also gives a future GUI a stable local boundary. [ADR 0006](docs/adr/0006-m5-persistent-node.md) and the [M5 node guide](docs/M5_PERSISTENT_NODE.md) describe the implementation.
@@ -74,7 +83,7 @@ Manual M1 `--relay`, `--route` and `--key` commands remain available for regress
 
 ## Testing
 
-`cargo test --workspace` is the complete milestone validation. It includes real child-process tests for the CLI, daemon/API lifecycle, persistent storage, restart recovery, multi-source transfer, resume, serving after restart and simultaneous upload/download. Manual multi-terminal demos are optional debugging tools rather than acceptance requirements.
+`cargo test --workspace` is the complete milestone validation. It includes real child-process tests for the CLI, desktop controller, daemon/API lifecycle, authentication, persistent storage, restart recovery, pause/resume, verified progress, multi-source transfer, serving after restart and simultaneous upload/download. Manual UI or multi-terminal demos are optional debugging tools rather than acceptance requirements.
 
 ## Compatibility with the BitTorrent ecosystem
 
@@ -144,6 +153,7 @@ Protocol changes that affect interoperability should be documented before they b
 - [M3 discovery research](docs/M3_DISCOVERY_RESEARCH.md)
 - [M5 persistent node](docs/M5_PERSISTENT_NODE.md)
 - [M6 BitTorrent interoperability research](docs/M6_BITTORRENT_INTEROP_RESEARCH.md)
+- [M7 reference desktop client](docs/M7_DESKTOP_CLIENT.md)
 - [Related work](docs/RELATED_WORK.md)
 - [Design principles](docs/DESIGN_PRINCIPLES.md)
 - [Roadmap](ROADMAP.md)

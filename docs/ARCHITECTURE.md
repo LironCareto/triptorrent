@@ -115,3 +115,13 @@ M6 keeps the current TripTorrent BLAKE3 content identity independent from BitTor
 The persistent content layer is shared by isolated network adapters. A TripTorrent-native adapter uses an M3 discovery capability, native discovery, and relayed transfer. A future classic adapter may use trackers, Mainline DHT, PEX, local discovery, web seeds, and direct peers only under an explicit dual-network or classic policy. TripTorrent-only policy fails closed and never invokes the classic adapter. Network modes, active paths, alias status, and private-torrent restrictions must remain visible through local APIs and clients.
 
 M6 implements only an offline research crate for strict bencoding, identity calculation, magnet parsing, Merkle validation, and path sanitization. It adds no production BitTorrent network component. [RFC 0004](../rfcs/0004-namespaced-bittorrent-compatibility.md) defines the selected architecture; [the research report](M6_BITTORRENT_INTEROP_RESEARCH.md) records evidence and remaining questions.
+
+## M7 desktop and local API boundary
+
+M7 adds `triptorrent-desktop`, a native `egui`/`eframe` reference client, and `triptorrent-node-api`, the shared typed DTO and loopback HTTP client crate. The desktop and CLI depend on the API client. Only `triptorrent-node` owns SQLite, managed files, recovery, providers, downloads and API routing; presentation code cannot bypass authentication or call the swarm engine.
+
+The desktop controller performs API and process work on a background thread. It probes an existing node before starting the adjacent CLI sidecar, waits for readiness, polls at a bounded interval and reconnects with backoff. Closing the window does not stop the persistent node. UI state is a snapshot of daemon state rather than a second transfer state machine.
+
+The local API now reports typed content identities, advertised state, verified bytes/chunks, measured verified-byte rate, provider/retry/rejection contribution, and the active network path. Cooperative pause stops new chunk scheduling, releases sessions and preserves M4 partial state; resume starts a fresh discovery session after revalidating completed chunks. A persisted `paused` state is excluded from automatic interrupted-transfer recovery.
+
+The structured privacy model labels the actual M2 discovery and M4 relay path and explicitly marks M3 private discovery and M6 classic networking inactive. This is an implementation API extension, not a wire-protocol change. See [ADR 0008](adr/0008-m7-local-api-desktop-client.md) and the [M7 guide](M7_DESKTOP_CLIENT.md).

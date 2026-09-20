@@ -10,23 +10,100 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use triptorrent_core::{ContentId, Manifest};
+pub use triptorrent_node_api::{
+    ContentIdentity, ContentRecord, ProviderContribution, TransferRecord,
+};
+use triptorrent_node_api::{LocalApiClient, LocalApiConnection};
 
 const API_MAX_REQUEST: usize = 1024 * 1024;
 const API_TIMEOUT: Duration = Duration::from_secs(5);
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+const FETCH_RUNNING: u8 = 0;
+const FETCH_PAUSED: u8 = 1;
+const FETCH_INTERRUPTED: u8 = 2;
 
 /// Transfer result needed by the persistent node state machine.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct PersistentFetchStats {
     /// Chunks reused from a previous partial transfer.
     pub resumed_chunks: usize,
+    /// Final verified contribution and rejection counters per provider.
+    pub provider_contributions: Vec<ProviderContribution>,
+    /// Requests reassigned after provider failure.
+    pub retry_count: usize,
+    /// Provider responses rejected during this run.
+    pub rejected_chunks: usize,
+}
+
+/// Verified progress reported by a transfer engine.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VerifiedProgress {
+    pub bytes_total: u64,
+    pub verified_bytes: u64,
+    pub total_chunks: usize,
+    pub verified_chunks: usize,
+    pub provider_count: usize,
+    pub retry_count: usize,
+    pub rejected_chunks: usize,
+}
+
+/// Reason a cooperative fetch was asked to stop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FetchStopReason {
+    Paused,
+    Interrupted,
+}
+
+/// Cooperative control and verified-progress channel for one fetch.
+#[derive(Clone)]
+pub struct FetchControl {
+    state: Arc<AtomicU8>,
+    observer: Arc<dyn Fn(VerifiedProgress) + Send + Sync>,
+}
+
+impl FetchControl {
+    fn new(observer: impl Fn(VerifiedProgress) + Send + Sync + 'static) -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(FETCH_RUNNING)),
+            observer: Arc::new(observer),
+        }
+    }
+
+    /// Whether the engine should continue discovery and chunk scheduling.
+    #[must_use]
+    pub fn should_continue(&self) -> bool {
+        self.state.load(Ordering::Relaxed) == FETCH_RUNNING
+    }
+
+    /// Reports progress that counts only locally verified bytes and chunks.
+    pub fn report(&self, progress: VerifiedProgress) {
+        (self.observer)(progress);
+    }
+
+    /// Returns the requested stop reason, if any.
+    #[must_use]
+    pub fn stop_reason(&self) -> Option<FetchStopReason> {
+        match self.state.load(Ordering::Relaxed) {
+            FETCH_PAUSED => Some(FetchStopReason::Paused),
+            FETCH_INTERRUPTED => Some(FetchStopReason::Interrupted),
+            _ => None,
+        }
+    }
+
+    fn pause(&self) {
+        self.state.store(FETCH_PAUSED, Ordering::Relaxed);
+    }
+
+    fn interrupt(&self) {
+        self.state.store(FETCH_INTERRUPTED, Ordering::Relaxed);
+    }
 }
 
 /// Boundary between the persistent node and the current network implementation.
@@ -59,6 +136,7 @@ pub trait TransferEngine: Send + Sync {
         content_id: ContentId,
         output: &Path,
         download_limit: u64,
+        control: &FetchControl,
     ) -> Result<PersistentFetchStats>;
 }
 
@@ -119,7 +197,8 @@ impl NodeConfig {
     /// Returns an error if secure random key generation fails.
     pub fn initialized(data_dir: PathBuf) -> Result<Self> {
         let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes).context("failed to generate API token")?;
+        getrandom::fill(&mut token_bytes)
+            .map_err(|error| anyhow::anyhow!("failed to generate API token: {error}"))?;
         let token = hex::encode(token_bytes);
         Ok(Self {
             data_dir,
@@ -252,32 +331,6 @@ fn environment_values() -> HashMap<String, String> {
     .collect()
 }
 
-/// Persistent content metadata returned through the local API.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ContentRecord {
-    pub content_id: String,
-    pub length: u64,
-    pub chunk_count: usize,
-    pub data_path: PathBuf,
-    pub shared: bool,
-    pub complete: bool,
-    pub integrity: String,
-}
-
-/// Persistent transfer metadata returned through the local API.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TransferRecord {
-    pub id: i64,
-    pub content_id: String,
-    pub direction: String,
-    pub status: String,
-    pub bytes_total: u64,
-    pub bytes_transferred: u64,
-    pub resumed_chunks: usize,
-    pub error: Option<String>,
-    pub share_on_complete: bool,
-}
-
 struct Store {
     root: PathBuf,
     connection: Mutex<Connection>,
@@ -295,7 +348,7 @@ impl Store {
              PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
              INSERT INTO schema_version(version)
-               SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
+               SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
              CREATE TABLE IF NOT EXISTS content(
                content_id TEXT PRIMARY KEY,
                length INTEGER NOT NULL,
@@ -314,9 +367,17 @@ impl Store {
                status TEXT NOT NULL,
                bytes_total INTEGER NOT NULL DEFAULT 0,
                bytes_transferred INTEGER NOT NULL DEFAULT 0,
+               verified_chunks INTEGER NOT NULL DEFAULT 0,
+               total_chunks INTEGER NOT NULL DEFAULT 0,
+               current_rate_bps INTEGER NOT NULL DEFAULT 0,
+               provider_count INTEGER NOT NULL DEFAULT 0,
+               retry_count INTEGER NOT NULL DEFAULT 0,
+               rejected_chunks INTEGER NOT NULL DEFAULT 0,
+               provider_contributions TEXT NOT NULL DEFAULT '[]',
                resumed_chunks INTEGER NOT NULL DEFAULT 0,
                error TEXT,
                share_on_complete INTEGER NOT NULL,
+               network_path TEXT NOT NULL DEFAULT 'encrypted_relayed_swarm',
                created_at INTEGER NOT NULL,
                updated_at INTEGER NOT NULL
              );",
@@ -325,8 +386,22 @@ impl Store {
             connection.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
                 row.get(0)
             })?;
-        if version != SCHEMA_VERSION {
-            bail!("unsupported node index schema version {version}");
+        match version {
+            1 => {
+                connection.execute_batch(
+                    "ALTER TABLE transfers ADD COLUMN verified_chunks INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE transfers ADD COLUMN total_chunks INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE transfers ADD COLUMN current_rate_bps INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE transfers ADD COLUMN provider_count INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE transfers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE transfers ADD COLUMN rejected_chunks INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE transfers ADD COLUMN provider_contributions TEXT NOT NULL DEFAULT '[]';
+                     ALTER TABLE transfers ADD COLUMN network_path TEXT NOT NULL DEFAULT 'encrypted_relayed_swarm';
+                     UPDATE schema_version SET version=2;",
+                )?;
+            }
+            SCHEMA_VERSION => {}
+            _ => bail!("unsupported node index schema version {version}"),
         }
         let store = Self {
             root: root.to_owned(),
@@ -543,7 +618,7 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
         let active: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM transfers WHERE content_id=?1 AND status IN ('running','interrupted')",
+            "SELECT COUNT(*) FROM transfers WHERE content_id=?1 AND status IN ('running','pausing','paused','interrupted')",
             [content_id],
             |row| row.get(0),
         )?;
@@ -573,7 +648,7 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
         connection.execute(
-            "UPDATE transfers SET status=?1,bytes_total=?2,bytes_transferred=?3,resumed_chunks=?4,error=?5,updated_at=?6 WHERE id=?7",
+            "UPDATE transfers SET status=?1,bytes_total=?2,bytes_transferred=?3,resumed_chunks=?4,error=?5,current_rate_bps=0,updated_at=?6 WHERE id=?7",
             params![
                 status,
                 i64::try_from(bytes_total)?,
@@ -587,13 +662,87 @@ impl Store {
         Ok(())
     }
 
+    fn update_progress(
+        &self,
+        id: i64,
+        progress: VerifiedProgress,
+        current_rate_bps: u64,
+    ) -> Result<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+        connection.execute(
+            "UPDATE transfers SET bytes_total=?1,bytes_transferred=?2,verified_chunks=?3,total_chunks=?4,
+             current_rate_bps=?5,provider_count=?6,retry_count=?7,rejected_chunks=?8,updated_at=?9
+             WHERE id=?10 AND status IN ('running','pausing')",
+            params![
+                i64::try_from(progress.bytes_total)?,
+                i64::try_from(progress.verified_bytes)?,
+                i64::try_from(progress.verified_chunks)?,
+                i64::try_from(progress.total_chunks)?,
+                i64::try_from(current_rate_bps)?,
+                i64::try_from(progress.provider_count)?,
+                i64::try_from(progress.retry_count)?,
+                i64::try_from(progress.rejected_chunks)?,
+                unix_time(),
+                id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn set_transfer_status(&self, id: i64, status: &str, error: Option<&str>) -> Result<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+        connection.execute(
+            "UPDATE transfers SET status=?1,error=?2,current_rate_bps=0,updated_at=?3 WHERE id=?4",
+            params![status, error, unix_time(), id],
+        )?;
+        Ok(())
+    }
+
+    fn complete_transfer(
+        &self,
+        id: i64,
+        content_length: u64,
+        content_chunks: usize,
+        stats: &PersistentFetchStats,
+    ) -> Result<()> {
+        let contributions = serde_json::to_string(&stats.provider_contributions)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+        connection.execute(
+            "UPDATE transfers SET status='completed',bytes_total=?1,bytes_transferred=?1,
+             verified_chunks=?2,total_chunks=?2,current_rate_bps=0,retry_count=?3,rejected_chunks=?4,
+             provider_contributions=?5,resumed_chunks=?6,error=NULL,updated_at=?7 WHERE id=?8",
+            params![
+                i64::try_from(content_length)?,
+                i64::try_from(content_chunks)?,
+                i64::try_from(stats.retry_count)?,
+                i64::try_from(stats.rejected_chunks)?,
+                contributions,
+                i64::try_from(stats.resumed_chunks)?,
+                unix_time(),
+                id,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn list_transfers(&self) -> Result<Vec<TransferRecord>> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
         let mut statement = connection.prepare(
-            "SELECT id,content_id,direction,status,bytes_total,bytes_transferred,resumed_chunks,error,share_on_complete
+            "SELECT id,content_id,direction,status,bytes_total,bytes_transferred,verified_chunks,total_chunks,
+                    current_rate_bps,provider_count,retry_count,rejected_chunks,provider_contributions,
+                    resumed_chunks,error,share_on_complete,network_path
              FROM transfers ORDER BY id",
         )?;
         Ok(statement
@@ -608,7 +757,9 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
         connection
             .query_row(
-                "SELECT id,content_id,direction,status,bytes_total,bytes_transferred,resumed_chunks,error,share_on_complete
+                "SELECT id,content_id,direction,status,bytes_total,bytes_transferred,verified_chunks,total_chunks,
+                        current_rate_bps,provider_count,retry_count,rejected_chunks,provider_contributions,
+                        resumed_chunks,error,share_on_complete,network_path
                  FROM transfers WHERE id=?1",
                 [id],
                 transfer_from_row,
@@ -623,11 +774,13 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
         connection.execute(
-            "UPDATE transfers SET status='interrupted',updated_at=?1 WHERE status='running'",
+            "UPDATE transfers SET status='interrupted',current_rate_bps=0,updated_at=?1 WHERE status IN ('running','pausing')",
             [unix_time()],
         )?;
         let mut statement = connection.prepare(
-            "SELECT id,content_id,direction,status,bytes_total,bytes_transferred,resumed_chunks,error,share_on_complete
+            "SELECT id,content_id,direction,status,bytes_total,bytes_transferred,verified_chunks,total_chunks,
+                    current_rate_bps,provider_count,retry_count,rejected_chunks,provider_contributions,
+                    resumed_chunks,error,share_on_complete,network_path
              FROM transfers WHERE status='interrupted' ORDER BY id",
         )?;
         Ok(statement
@@ -641,7 +794,7 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
         connection.execute(
-            "UPDATE transfers SET status='interrupted',updated_at=?1 WHERE status='running'",
+            "UPDATE transfers SET status='interrupted',current_rate_bps=0,updated_at=?1 WHERE status IN ('running','pausing')",
             [unix_time()],
         )?;
         Ok(())
@@ -669,10 +822,16 @@ fn content_from_row(row: &rusqlite::Row<'_>, root: &Path) -> rusqlite::Result<Co
     })?;
     Ok(ContentRecord {
         content_id: row.get(0)?,
+        identities: vec![ContentIdentity {
+            namespace: "triptorrent".into(),
+            value: row.get(0)?,
+            verification: "verified".into(),
+        }],
         length: u64::try_from(length).unwrap_or(0),
         chunk_count: usize::try_from(chunks).unwrap_or(0),
         data_path,
         shared: row.get::<_, i64>(4)? != 0,
+        advertised: false,
         complete: row.get::<_, i64>(5)? != 0,
         integrity: row.get(6)?,
     })
@@ -691,6 +850,10 @@ fn managed_path(root: &Path, relative: &str) -> Option<PathBuf> {
 }
 
 fn transfer_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRecord> {
+    let contributions: String = row.get(12)?;
+    let provider_contributions = serde_json::from_str(&contributions).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(TransferRecord {
         id: row.get(0)?,
         content_id: row.get(1)?,
@@ -698,9 +861,17 @@ fn transfer_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRecord
         status: row.get(3)?,
         bytes_total: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
         bytes_transferred: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
-        resumed_chunks: usize::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-        error: row.get(7)?,
-        share_on_complete: row.get::<_, i64>(8)? != 0,
+        verified_chunks: usize::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+        total_chunks: usize::try_from(row.get::<_, i64>(7)?).unwrap_or(0),
+        current_rate_bps: u64::try_from(row.get::<_, i64>(8)?).unwrap_or(0),
+        provider_count: usize::try_from(row.get::<_, i64>(9)?).unwrap_or(0),
+        retry_count: usize::try_from(row.get::<_, i64>(10)?).unwrap_or(0),
+        rejected_chunks: usize::try_from(row.get::<_, i64>(11)?).unwrap_or(0),
+        provider_contributions,
+        resumed_chunks: usize::try_from(row.get::<_, i64>(13)?).unwrap_or(0),
+        error: row.get(14)?,
+        share_on_complete: row.get::<_, i64>(15)? != 0,
+        network_path: row.get(16)?,
     })
 }
 
@@ -769,6 +940,7 @@ struct NodeRuntime {
     started: Instant,
     shutdown: AtomicBool,
     providers: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    downloads: Mutex<HashMap<i64, FetchControl>>,
     active_downloads: AtomicUsize,
     active_uploads: AtomicUsize,
     bytes_downloaded: AtomicU64,
@@ -789,6 +961,7 @@ impl NodeRuntime {
             started: Instant::now(),
             shutdown: AtomicBool::new(false),
             providers: Mutex::new(HashMap::new()),
+            downloads: Mutex::new(HashMap::new()),
             active_downloads: AtomicUsize::new(0),
             active_uploads: AtomicUsize::new(0),
             bytes_downloaded: AtomicU64::new(0),
@@ -815,11 +988,15 @@ impl NodeRuntime {
     }
 
     fn add_content(self: &Arc<Self>, path: &Path, shared: bool) -> Result<ContentRecord> {
-        let content = self.store.add_content(path, shared)?;
+        let mut content = self.store.add_content(path, shared)?;
         info!(event = "content_added", content_id = %content.content_id, length = content.length);
         if shared {
             self.start_provider(content.clone())?;
         }
+        content.advertised = self
+            .providers
+            .lock()
+            .is_ok_and(|providers| providers.contains_key(&content.content_id));
         Ok(content)
     }
 
@@ -828,6 +1005,18 @@ impl NodeRuntime {
         self.store.remove_content(content_id, delete_bytes)?;
         info!(event = "content_removed", content_id, delete_bytes);
         Ok(())
+    }
+
+    fn list_content(&self) -> Result<Vec<ContentRecord>> {
+        let advertised = self
+            .providers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("provider lock poisoned"))?;
+        let mut content = self.store.list_content()?;
+        for record in &mut content {
+            record.advertised = advertised.contains_key(&record.content_id);
+        }
+        Ok(content)
     }
 
     fn start_provider(self: &Arc<Self>, content: ContentRecord) -> Result<()> {
@@ -902,6 +1091,28 @@ impl NodeRuntime {
     }
 
     fn spawn_download(self: &Arc<Self>, transfer: TransferRecord) -> Result<()> {
+        let (bootstrap, content_id, output, control) = self.prepare_download(&transfer)?;
+        {
+            let mut downloads = self
+                .downloads
+                .lock()
+                .map_err(|_| anyhow::anyhow!("download lock poisoned"))?;
+            if downloads.insert(transfer.id, control.clone()).is_some() {
+                bail!("transfer {} already has an active worker", transfer.id);
+            }
+        }
+        self.active_downloads.fetch_add(1, Ordering::Relaxed);
+        let runtime = Arc::clone(self);
+        thread::spawn(move || {
+            runtime.run_download(&transfer, bootstrap, content_id, &output, &control);
+        });
+        Ok(())
+    }
+
+    fn prepare_download(
+        &self,
+        transfer: &TransferRecord,
+    ) -> Result<(SocketAddr, ContentId, PathBuf, FetchControl)> {
         let bootstrap = self
             .config
             .bootstrap
@@ -918,57 +1129,139 @@ impl NodeRuntime {
             transfer.resumed_chunks,
             None,
         )?;
-        self.active_downloads.fetch_add(1, Ordering::Relaxed);
-        let runtime = Arc::clone(self);
-        thread::spawn(move || {
-            info!(event = "download_started", transfer_id = transfer.id, content_id = %transfer.content_id);
-            let result = runtime.engine.fetch(
-                bootstrap,
-                content_id,
-                &output,
-                runtime.config.download_limit,
-            );
-            match result {
-                Ok(stats) => match runtime
-                    .store
-                    .complete_download(content_id, transfer.share_on_complete)
-                {
-                    Ok(content) => {
-                        let _ = runtime.store.update_transfer(
-                            transfer.id,
-                            "completed",
-                            content.length,
-                            content.length,
-                            stats.resumed_chunks,
-                            None,
-                        );
-                        runtime
-                            .bytes_downloaded
-                            .fetch_add(content.length, Ordering::Relaxed);
-                        runtime.completed_transfers.fetch_add(1, Ordering::Relaxed);
-                        if content.shared {
-                            let _ = runtime.start_provider(content);
-                        }
-                        info!(
-                            event = "download_completed",
-                            transfer_id = transfer.id,
-                            resumed_chunks = stats.resumed_chunks
-                        );
-                    }
-                    Err(error) => runtime.fail_transfer(transfer.id, &error),
-                },
-                Err(error) => runtime.fail_transfer(transfer.id, &error),
-            }
-            runtime.active_downloads.fetch_sub(1, Ordering::Relaxed);
+        let store = Arc::clone(&self.store);
+        let transfer_id = transfer.id;
+        let started = Instant::now();
+        let progress_baseline = Mutex::new(None::<u64>);
+        let control = FetchControl::new(move |progress| {
+            let baseline = progress_baseline
+                .lock()
+                .map_or(progress.verified_bytes, |mut baseline| {
+                    *baseline.get_or_insert(progress.verified_bytes)
+                });
+            let elapsed_millis = u64::try_from(started.elapsed().as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1);
+            let rate = progress
+                .verified_bytes
+                .saturating_sub(baseline)
+                .saturating_mul(1_000)
+                / elapsed_millis;
+            let _ = store.update_progress(transfer_id, progress, rate);
         });
-        Ok(())
+        Ok((bootstrap, content_id, output, control))
+    }
+
+    fn run_download(
+        self: &Arc<Self>,
+        transfer: &TransferRecord,
+        bootstrap: SocketAddr,
+        content_id: ContentId,
+        output: &Path,
+        control: &FetchControl,
+    ) {
+        info!(event = "download_started", transfer_id = transfer.id, content_id = %transfer.content_id);
+        let result = self.engine.fetch(
+            bootstrap,
+            content_id,
+            output,
+            self.config.download_limit,
+            control,
+        );
+        if let Ok(mut downloads) = self.downloads.lock() {
+            downloads.remove(&transfer.id);
+        }
+        match result {
+            Ok(stats) => self.finish_download(transfer, content_id, &stats),
+            Err(error) => self.finish_stopped_download(transfer, control, &error),
+        }
+        self.active_downloads.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn finish_download(
+        self: &Arc<Self>,
+        transfer: &TransferRecord,
+        content_id: ContentId,
+        stats: &PersistentFetchStats,
+    ) {
+        match self
+            .store
+            .complete_download(content_id, transfer.share_on_complete)
+        {
+            Ok(content) => {
+                let _ = self.store.complete_transfer(
+                    transfer.id,
+                    content.length,
+                    content.chunk_count,
+                    stats,
+                );
+                self.bytes_downloaded
+                    .fetch_add(content.length, Ordering::Relaxed);
+                self.completed_transfers.fetch_add(1, Ordering::Relaxed);
+                if content.shared {
+                    let _ = self.start_provider(content);
+                }
+                info!(
+                    event = "download_completed",
+                    transfer_id = transfer.id,
+                    resumed_chunks = stats.resumed_chunks
+                );
+            }
+            Err(error) => self.fail_transfer(transfer.id, &error),
+        }
+    }
+
+    fn finish_stopped_download(
+        &self,
+        transfer: &TransferRecord,
+        control: &FetchControl,
+        error: &anyhow::Error,
+    ) {
+        match control.stop_reason() {
+            Some(FetchStopReason::Paused) => {
+                let _ = self.store.set_transfer_status(transfer.id, "paused", None);
+                info!(event = "download_paused", transfer_id = transfer.id);
+            }
+            Some(FetchStopReason::Interrupted) => {
+                let _ = self
+                    .store
+                    .set_transfer_status(transfer.id, "interrupted", None);
+                info!(event = "download_interrupted", transfer_id = transfer.id);
+            }
+            None => self.fail_transfer(transfer.id, error),
+        }
+    }
+
+    fn pause_transfer(&self, id: i64) -> Result<()> {
+        let transfer = self.store.get_transfer(id)?.context("unknown transfer")?;
+        if transfer.status != "running" && transfer.status != "pausing" {
+            bail!("only a running download can be paused");
+        }
+        let downloads = self
+            .downloads
+            .lock()
+            .map_err(|_| anyhow::anyhow!("download lock poisoned"))?;
+        let control = downloads
+            .get(&id)
+            .context("transfer worker is unavailable")?;
+        control.pause();
+        self.store.set_transfer_status(id, "pausing", None)
+    }
+
+    fn resume_transfer(self: &Arc<Self>, id: i64) -> Result<()> {
+        if self.active_downloads.load(Ordering::Relaxed) >= self.config.max_concurrent_transfers {
+            bail!("maximum concurrent transfers reached");
+        }
+        let transfer = self.store.get_transfer(id)?.context("unknown transfer")?;
+        if transfer.status != "paused" {
+            bail!("only an explicitly paused download can be resumed");
+        }
+        self.spawn_download(transfer)
     }
 
     fn fail_transfer(&self, id: i64, failure: &anyhow::Error) {
         let message = failure.to_string();
-        let _ = self
-            .store
-            .update_transfer(id, "failed", 0, 0, 0, Some(&message));
+        let _ = self.store.set_transfer_status(id, "failed", Some(&message));
         self.failed_transfers.fetch_add(1, Ordering::Relaxed);
         error!(event = "download_failed", transfer_id = id, error = %failure);
     }
@@ -995,6 +1288,11 @@ impl NodeRuntime {
         if let Ok(providers) = self.providers.lock() {
             for enabled in providers.values() {
                 enabled.store(false, Ordering::Relaxed);
+            }
+        }
+        if let Ok(downloads) = self.downloads.lock() {
+            for control in downloads.values() {
+                control.interrupt();
             }
         }
         let _ = self.store.mark_running_interrupted();
@@ -1121,32 +1419,9 @@ fn route_request_inner(runtime: &Arc<NodeRuntime>, request: &HttpRequest) -> Res
                 "protocol_peer_identity": "ephemeral-per-advertisement"
             }),
         )),
-        ("GET", "/v1/content") => Ok((200, serde_json::to_value(runtime.store.list_content()?)?)),
-        ("POST", "/v1/content") => {
-            #[derive(Deserialize)]
-            struct Add {
-                path: PathBuf,
-                #[serde(default = "default_true")]
-                shared: bool,
-            }
-            let body: Add =
-                serde_json::from_slice(&request.body).context("invalid content-add JSON")?;
-            let record = runtime.add_content(&body.path, body.shared)?;
-            Ok((201, serde_json::to_value(record)?))
-        }
-        ("POST", "/v1/fetches") => {
-            #[derive(Deserialize)]
-            struct Fetch {
-                content_id: String,
-                #[serde(default = "default_true")]
-                shared: bool,
-            }
-            let body: Fetch =
-                serde_json::from_slice(&request.body).context("invalid fetch JSON")?;
-            let content_id = ContentId::from_str(&body.content_id)?;
-            let id = runtime.start_fetch(content_id, body.shared)?;
-            Ok((202, json!({"transfer_id": id, "status": "running"})))
-        }
+        ("GET", "/v1/content") => Ok((200, serde_json::to_value(runtime.list_content()?)?)),
+        ("POST", "/v1/content") => add_content_request(runtime, request),
+        ("POST", "/v1/fetches") => fetch_request(runtime, request),
         ("GET", "/v1/transfers") => {
             Ok((200, serde_json::to_value(runtime.store.list_transfers()?)?))
         }
@@ -1154,34 +1429,101 @@ fn route_request_inner(runtime: &Arc<NodeRuntime>, request: &HttpRequest) -> Res
             200,
             json!({
                 "bootstrap": runtime.config.bootstrap,
+                "bootstrap_configured": runtime.config.bootstrap.is_some(),
                 "provider_workers": runtime.providers.lock().map_or(0, |p| p.len()),
                 "known_relays": Value::Null,
+                "api_version": "v1",
+                "node_version": env!("CARGO_PKG_VERSION"),
             }),
+        )),
+        ("GET", "/v1/network-privacy") => Ok((
+            200,
+            serde_json::to_value(triptorrent_node_api::NetworkPrivacyStatus::current_prototype())?,
         )),
         ("POST", "/v1/shutdown") => {
             runtime.shutdown.store(true, Ordering::Relaxed);
             Ok((202, json!({"status": "stopping"})))
         }
         ("DELETE", _) if path.starts_with("/v1/content/") => {
-            let content_id = path.trim_start_matches("/v1/content/");
-            let delete_bytes = query.split('&').any(|item| item == "delete_bytes=true");
-            runtime.remove_content(content_id, delete_bytes)?;
-            Ok((
-                200,
-                json!({"removed": content_id, "deleted_managed_bytes": delete_bytes}),
-            ))
+            delete_content_request(runtime, path, query)
         }
-        ("GET", _) if path.starts_with("/v1/transfers/") => {
-            let id: i64 = path
-                .trim_start_matches("/v1/transfers/")
-                .parse()
-                .context("invalid transfer ID")?;
-            match runtime.store.get_transfer(id)? {
-                Some(record) => Ok((200, serde_json::to_value(record)?)),
-                None => Ok((404, error_json("not_found", "unknown transfer"))),
-            }
+        ("POST", _) if path.starts_with("/v1/transfers/") && path.ends_with("/pause") => {
+            pause_request(runtime, path)
         }
+        ("POST", _) if path.starts_with("/v1/transfers/") && path.ends_with("/resume") => {
+            resume_request(runtime, path)
+        }
+        ("GET", _) if path.starts_with("/v1/transfers/") => transfer_request(runtime, path),
         _ => Ok((404, error_json("not_found", "unknown API route"))),
+    }
+}
+
+fn add_content_request(runtime: &Arc<NodeRuntime>, request: &HttpRequest) -> Result<(u16, Value)> {
+    #[derive(Deserialize)]
+    struct Add {
+        path: PathBuf,
+        #[serde(default = "default_true")]
+        shared: bool,
+    }
+    let body: Add = serde_json::from_slice(&request.body).context("invalid content-add JSON")?;
+    let record = runtime.add_content(&body.path, body.shared)?;
+    Ok((201, serde_json::to_value(record)?))
+}
+
+fn fetch_request(runtime: &Arc<NodeRuntime>, request: &HttpRequest) -> Result<(u16, Value)> {
+    #[derive(Deserialize)]
+    struct Fetch {
+        content_id: String,
+        #[serde(default = "default_true")]
+        shared: bool,
+    }
+    let body: Fetch = serde_json::from_slice(&request.body).context("invalid fetch JSON")?;
+    let content_id = ContentId::from_str(&body.content_id)?;
+    let id = runtime.start_fetch(content_id, body.shared)?;
+    Ok((202, json!({"transfer_id": id, "status": "running"})))
+}
+
+fn delete_content_request(
+    runtime: &Arc<NodeRuntime>,
+    path: &str,
+    query: &str,
+) -> Result<(u16, Value)> {
+    let content_id = path.trim_start_matches("/v1/content/");
+    let delete_bytes = query.split('&').any(|item| item == "delete_bytes=true");
+    runtime.remove_content(content_id, delete_bytes)?;
+    Ok((
+        200,
+        json!({"removed": content_id, "deleted_managed_bytes": delete_bytes}),
+    ))
+}
+
+fn transfer_action_id(path: &str, action: &str) -> Result<i64> {
+    path.trim_start_matches("/v1/transfers/")
+        .trim_end_matches(action)
+        .parse()
+        .context("invalid transfer ID")
+}
+
+fn pause_request(runtime: &NodeRuntime, path: &str) -> Result<(u16, Value)> {
+    let id = transfer_action_id(path, "/pause")?;
+    runtime.pause_transfer(id)?;
+    Ok((202, json!({"transfer_id": id, "status": "pausing"})))
+}
+
+fn resume_request(runtime: &Arc<NodeRuntime>, path: &str) -> Result<(u16, Value)> {
+    let id = transfer_action_id(path, "/resume")?;
+    runtime.resume_transfer(id)?;
+    Ok((202, json!({"transfer_id": id, "status": "running"})))
+}
+
+fn transfer_request(runtime: &NodeRuntime, path: &str) -> Result<(u16, Value)> {
+    let id: i64 = path
+        .trim_start_matches("/v1/transfers/")
+        .parse()
+        .context("invalid transfer ID")?;
+    match runtime.store.get_transfer(id)? {
+        Some(record) => Ok((200, serde_json::to_value(record)?)),
+        None => Ok((404, error_json("not_found", "unknown transfer"))),
     }
 }
 
@@ -1284,38 +1626,11 @@ pub fn api_request(
     target: &str,
     body: Option<Value>,
 ) -> Result<Value> {
-    let mut stream = TcpStream::connect_timeout(&config.api_listen, API_TIMEOUT)
-        .with_context(|| format!("failed to connect to local API at {}", config.api_listen))?;
-    stream.set_read_timeout(Some(API_TIMEOUT))?;
-    stream.set_write_timeout(Some(API_TIMEOUT))?;
-    let encoded = body.map_or_else(Vec::new, |value| {
-        serde_json::to_vec(&value).unwrap_or_default()
-    });
-    write!(
-        stream,
-        "{method} {target} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        config.api_listen,
-        config.api_token,
-        encoded.len()
-    )?;
-    stream.write_all(&encoded)?;
-    stream.flush()?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
-    let split =
-        find_subslice(&response, b"\r\n\r\n").context("local API returned malformed HTTP")?;
-    let headers = std::str::from_utf8(&response[..split])?;
-    let status: u16 = headers
-        .split_whitespace()
-        .nth(1)
-        .context("local API omitted status")?
-        .parse()?;
-    let value: Value = serde_json::from_slice(&response[split + 4..])
-        .context("local API returned invalid JSON")?;
-    if !(200..300).contains(&status) {
-        bail!("local API returned HTTP {status}: {value}");
-    }
-    Ok(value)
+    LocalApiClient::new(LocalApiConnection {
+        api_listen: config.api_listen,
+        api_token: config.api_token.clone(),
+    })
+    .request_value(method, target, body)
 }
 
 #[cfg(test)]
@@ -1412,5 +1727,56 @@ mod tests {
         }
         drop(store);
         assert!(Store::open(&data).is_err());
+    }
+
+    #[test]
+    fn version_one_index_migrates_transfer_progress_fields() {
+        let directory = tempdir().unwrap();
+        let data = directory.path().join("data");
+        fs::create_dir_all(data.join("state")).unwrap();
+        let database = data.join("state").join("node.sqlite3");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_version(version INTEGER NOT NULL);
+                 INSERT INTO schema_version VALUES(1);
+                 CREATE TABLE content(
+                   content_id TEXT PRIMARY KEY,length INTEGER NOT NULL,chunk_count INTEGER NOT NULL,
+                   data_path TEXT NOT NULL,manifest_path TEXT NOT NULL,shared INTEGER NOT NULL,
+                   complete INTEGER NOT NULL,integrity TEXT NOT NULL,created_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE transfers(
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,content_id TEXT NOT NULL,direction TEXT NOT NULL,
+                   status TEXT NOT NULL,bytes_total INTEGER NOT NULL DEFAULT 0,
+                   bytes_transferred INTEGER NOT NULL DEFAULT 0,resumed_chunks INTEGER NOT NULL DEFAULT 0,
+                   error TEXT,share_on_complete INTEGER NOT NULL,created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&data).unwrap();
+        let connection = store.connection.lock().unwrap();
+        let version: i64 = connection
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let mut statement = connection.prepare("PRAGMA table_info(transfers)").unwrap();
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        for expected in [
+            "verified_chunks",
+            "total_chunks",
+            "current_rate_bps",
+            "provider_count",
+            "provider_contributions",
+            "network_path",
+        ] {
+            assert!(columns.iter().any(|column| column == expected));
+        }
     }
 }

@@ -88,6 +88,14 @@ Imported metadata is hostile input. Strict canonical bencoding, size/depth bound
 
 See the [M6 threat matrix](M6_BITTORRENT_INTEROP_RESEARCH.md#12-compatibility-threat-matrix) for path-specific controls.
 
+## M7 desktop and local API
+
+The desktop reads the bearer token from the node configuration and sends it only in loopback mutation requests. It does not place the token in child-process arguments, UI state, diagnostics or normal errors. A user-local configuration file and loopback binding still do not protect against malware, debuggers or another process running with the same account. A desktop-started daemon inherits the same host trust boundary as M5.
+
+The GUI exposes content IDs, local managed paths, bootstrap addresses, transfer state and provider/route diagnostics. Its copyable diagnostics omit bearer tokens and session keys, but the remaining metadata can identify activity and must be handled as privacy-sensitive. Starting the sidecar only after a failed health probe reduces accidental duplicate nodes; it is not a general cross-user locking or service-management mechanism.
+
+The Network & Privacy view is descriptive, not a security indicator. It reports centralized M2 discovery, encrypted relayed M4 data, no direct peer connection and no anonymity guarantee. It never presents the unimplemented M3 or M6 paths as active. Pause preserves verified bytes on disk and closes ephemeral sessions, but it is not a secure erasure or concealment feature.
+
 ## Security rule
 
 No protocol component should make an anonymity claim stronger than what the threat model and implementation can support.

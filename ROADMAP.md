@@ -74,12 +74,16 @@ M5 is a reference-implementation runtime boundary, not a wire-protocol change. I
 
 M6 selects an import-first design with verified BitTorrent aliases and an optional, isolated classic adapter. TripTorrent-only transfers fail closed; importing classic metadata never enables classic networking. This is a research architecture and parser/vector prototype, not production tracker, DHT, peer-protocol, bridge or dual-network support.
 
-## M7 — Reference desktop client
-- add content
-- transfer list
-- progress
-- pause/resume
-- network/privacy status
+## M7 — Reference desktop client (implemented prototype)
+- [x] native Rust desktop client using the authenticated M5 local API
+- [x] connect-or-start daemon lifecycle with readiness checks and reconnect backoff
+- [x] persistent content library import, removal and managed-copy deletion
+- [x] fetch workflow and transfer details with verified progress
+- [x] real download pause/resume with paused state preserved across restart
+- [x] truthful structured network/privacy and diagnostic status
+- [x] Windows-safe process-level desktop/controller acceptance tests
+
+M7 keeps the GUI, typed API client and daemon/runtime as separate crates. It reports the currently implemented M2 bootstrap and encrypted M4 relay path without claiming anonymity. Installers, OS services, production M3 discovery and M6 classic/dual networking remain future work.
 
 ## M8 — Adversarial testing
 - fuzzing
