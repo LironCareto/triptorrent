@@ -21,7 +21,21 @@ cargo fuzz run protocol -- -max_total_time=300
 cargo fuzz run interop -- -max_total_time=300
 ```
 
-The Linux CI smoke job uses nightly Rust, fixed seeds and 1,000 executions per target. The normal suite neither requires nightly Rust nor Internet access. Both targets compile on Windows, but `cargo-fuzz 0.13.2` did not terminate its runner on the M8 Windows validation host, even with bounded flags, so local Windows campaigns are optional and must use an external process timeout. Fuzzer discoveries must be minimized and copied into an ordinary regression test before a fix is accepted.
+The Linux CI smoke job uses nightly Rust, fixed seeds and 1,000 executions per target. The normal suite neither requires nightly Rust nor Internet access.
+
+On Windows, run campaigns from a Visual Studio Developer PowerShell so the LLVM AddressSanitizer runtime is on `PATH`. If using an ordinary PowerShell, locate the runtime installed by Visual Studio Build Tools and add its directory for the current session:
+
+```powershell
+$asan = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\VC\Tools\MSVC\*\bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll" |
+    Sort-Object FullName -Descending |
+    Select-Object -First 1
+if (-not $asan) { throw 'Install the MSVC AddressSanitizer component with Visual Studio Build Tools.' }
+$env:PATH = "$($asan.Directory.FullName);$env:PATH"
+cargo +nightly fuzz run protocol -- -runs=1000
+cargo +nightly fuzz run interop -- -runs=1000
+```
+
+Without that runtime path, Windows displays a missing `clang_rt.asan_dynamic-x86_64.dll` dialog and the parent fuzz command appears to hang. The M8 host completed 100-run `protocol` and `interop` campaigns after the path was configured. Local Windows campaigns remain optional. Fuzzer discoveries must be minimized and copied into an ordinary regression test before a fix is accepted.
 
 ## Attack surfaces and controls
 
