@@ -12,6 +12,11 @@ use triptorrent_core::ContentId;
 use unicode_normalization::UnicodeNormalization;
 
 const MAX_BENCODE_DEPTH: usize = 64;
+const MAX_BENCODE_INPUT: usize = 4 * 1024 * 1024;
+const MAX_BENCODE_NODES: usize = 100_000;
+const MAX_MAGNET_LENGTH: usize = 64 * 1024;
+const MAX_MAGNET_PARAMETERS: usize = 1_024;
+const MAX_PATH_COMPONENT_BYTES: usize = 255;
 const V2_BLOCK_SIZE: usize = 16 * 1024;
 
 /// A strictly parsed bencoded value with its byte range in the source.
@@ -56,6 +61,12 @@ pub enum BencodeError {
     /// Nesting exceeded the research parser's bound.
     #[error("bencoding exceeds maximum nesting depth")]
     TooDeep,
+    /// The encoded artifact exceeds the bounded research-parser input size.
+    #[error("bencoding exceeds maximum input size")]
+    TooLarge,
+    /// A compact input attempted to create too many collection nodes.
+    #[error("bencoding contains too many values")]
+    TooManyNodes,
 }
 
 /// Strictly parses one complete bencoded value.
@@ -69,7 +80,14 @@ pub enum BencodeError {
 /// Returns [`BencodeError`] for malformed, non-canonical, trailing, or deeply
 /// nested input.
 pub fn parse_bencode(input: &[u8]) -> Result<BencodeNode<'_>, BencodeError> {
-    let mut parser = Parser { input, position: 0 };
+    if input.len() > MAX_BENCODE_INPUT {
+        return Err(BencodeError::TooLarge);
+    }
+    let mut parser = Parser {
+        input,
+        position: 0,
+        nodes: 0,
+    };
     let value = parser.parse_node(0)?;
     if parser.position != input.len() {
         return Err(BencodeError::TrailingBytes(parser.position));
@@ -80,12 +98,17 @@ pub fn parse_bencode(input: &[u8]) -> Result<BencodeNode<'_>, BencodeError> {
 struct Parser<'a> {
     input: &'a [u8],
     position: usize,
+    nodes: usize,
 }
 
 impl<'a> Parser<'a> {
     fn parse_node(&mut self, depth: usize) -> Result<BencodeNode<'a>, BencodeError> {
         if depth > MAX_BENCODE_DEPTH {
             return Err(BencodeError::TooDeep);
+        }
+        self.nodes = self.nodes.saturating_add(1);
+        if self.nodes > MAX_BENCODE_NODES {
+            return Err(BencodeError::TooManyNodes);
         }
         let start = self.position;
         let token = *self
@@ -259,15 +282,20 @@ pub fn torrent_identity(metainfo: &[u8]) -> Result<TorrentIdentity, MetainfoErro
     let _ = piece_length;
 
     let v1_pieces = bytes_field(info_entries, b"pieces");
-    let v1_shape = find(info_entries, b"length").is_some() ^ find(info_entries, b"files").is_some();
-    let is_v1 =
-        v1_pieces.is_some_and(|pieces| !pieces.is_empty() && pieces.len() % 20 == 0) && v1_shape;
+    let v1_length = v1_payload_length(info_entries);
+    let expected_v1_pieces = v1_length.and_then(|length| {
+        let piece_length = u64::try_from(piece_length).ok()?;
+        usize::try_from(length.div_ceil(piece_length)).ok()
+    });
+    let is_v1 = v1_pieces
+        .zip(expected_v1_pieces)
+        .is_some_and(|(pieces, count)| pieces.len() == count.saturating_mul(20));
 
     let meta_version = integer_field(info_entries, b"meta version");
-    let is_v2 = meta_version == Some(2)
-        && find(info_entries, b"file tree")
-            .and_then(dictionary)
-            .is_some();
+    let v2_length = find(info_entries, b"file tree")
+        .and_then(dictionary)
+        .and_then(v2_tree_length);
+    let is_v2 = meta_version == Some(2) && v2_length.is_some();
     if meta_version.is_some() && meta_version != Some(2) {
         return Err(MetainfoError::InvalidField("meta version"));
     }
@@ -276,6 +304,9 @@ pub fn torrent_identity(metainfo: &[u8]) -> Result<TorrentIdentity, MetainfoErro
     }
     if meta_version.is_some() && !is_v2 {
         return Err(MetainfoError::InvalidField("v2 file tree"));
+    }
+    if is_v1 && is_v2 && v1_length != v2_length {
+        return Err(MetainfoError::InvalidField("hybrid payload length"));
     }
 
     let kind = match (is_v1, is_v2) {
@@ -289,6 +320,58 @@ pub fn torrent_identity(metainfo: &[u8]) -> Result<TorrentIdentity, MetainfoErro
         kind,
         btih: is_v1.then(|| hex::encode(Sha1::digest(raw_info))),
         btmh_sha256: is_v2.then(|| hex::encode(Sha256::digest(raw_info))),
+    })
+}
+
+fn v1_payload_length(entries: &[(&[u8], BencodeNode<'_>)]) -> Option<u64> {
+    match (find(entries, b"length"), find(entries, b"files")) {
+        (Some(length), None) => match length.value {
+            BencodeValue::Integer(value) => u64::try_from(value).ok(),
+            _ => None,
+        },
+        (None, Some(files)) => match &files.value {
+            BencodeValue::List(files) if !files.is_empty() => {
+                files.iter().try_fold(0_u64, |total, file| {
+                    let fields = dictionary(file)?;
+                    let length = u64::try_from(integer_field(fields, b"length")?).ok()?;
+                    let path = find(fields, b"path")?;
+                    let BencodeValue::List(parts) = &path.value else {
+                        return None;
+                    };
+                    if parts.is_empty()
+                        || parts
+                            .iter()
+                            .any(|part| !matches!(part.value, BencodeValue::Bytes(value) if !value.is_empty()))
+                    {
+                        return None;
+                    }
+                    total.checked_add(length)
+                })
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn v2_tree_length(entries: &[(&[u8], BencodeNode<'_>)]) -> Option<u64> {
+    if entries.is_empty() {
+        return None;
+    }
+    if entries.len() == 1 && entries[0].0.is_empty() {
+        let leaf = dictionary(&entries[0].1)?;
+        let length = u64::try_from(integer_field(leaf, b"length")?).ok()?;
+        if length > 0 && bytes_field(leaf, b"pieces root").is_none_or(|root| root.len() != 32) {
+            return None;
+        }
+        return Some(length);
+    }
+    entries.iter().try_fold(0_u64, |total, (name, node)| {
+        if name.is_empty() {
+            return None;
+        }
+        let child = dictionary(node)?;
+        total.checked_add(v2_tree_length(child)?)
     })
 }
 
@@ -406,6 +489,9 @@ pub enum MagnetError {
     /// A recognized `BitTorrent` exact topic is malformed.
     #[error("invalid BitTorrent exact topic")]
     InvalidExactTopic,
+    /// The URI or parameter count exceeds deterministic parser bounds.
+    #[error("magnet link exceeds parser limits")]
+    TooLarge,
 }
 
 /// Parses repeatable v1/v2/hybrid `BitTorrent` magnet hints without performing
@@ -416,10 +502,16 @@ pub enum MagnetError {
 /// Returns [`MagnetError`] for a wrong scheme, malformed escaping, missing
 /// exact topic, or invalid recognized `BitTorrent` hash.
 pub fn parse_magnet(uri: &str) -> Result<Magnet, MagnetError> {
+    if uri.len() > MAX_MAGNET_LENGTH {
+        return Err(MagnetError::TooLarge);
+    }
     let query = uri.strip_prefix("magnet:?").ok_or(MagnetError::Scheme)?;
     let mut magnet = Magnet::default();
     let mut exact_topics = 0_usize;
-    for parameter in query.split('&').filter(|part| !part.is_empty()) {
+    for (index, parameter) in query.split('&').filter(|part| !part.is_empty()).enumerate() {
+        if index >= MAX_MAGNET_PARAMETERS {
+            return Err(MagnetError::TooLarge);
+        }
         let (raw_name, raw_value) = parameter.split_once('=').unwrap_or((parameter, ""));
         let name = percent_decode(raw_name)?;
         let value = percent_decode(raw_value)?;
@@ -532,6 +624,9 @@ pub enum PathError {
     /// Windows device name or trailing dot/space.
     #[error("path component is reserved on Windows")]
     WindowsReserved,
+    /// A component exceeds the cross-platform byte bound.
+    #[error("path component exceeds 255 UTF-8 bytes")]
+    TooLong,
 }
 
 /// Normalizes one metadata path component to NFC and rejects traversal,
@@ -546,6 +641,9 @@ pub enum PathError {
 /// cross-platform managed store.
 pub fn sanitize_path_component(component: &str) -> Result<String, PathError> {
     let normalized: String = component.nfc().collect();
+    if normalized.len() > MAX_PATH_COMPONENT_BYTES {
+        return Err(PathError::TooLong);
+    }
     if normalized.is_empty() || normalized == "." || normalized == ".." {
         return Err(PathError::Structural);
     }
@@ -579,6 +677,7 @@ fn is_windows_device_name(component: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[derive(Deserialize)]
     struct Vectors {
@@ -684,5 +783,104 @@ mod tests {
             <[u8; 32]>::from(expected.finalize())
         );
         assert_eq!(v2_file_root(&[]), Err(MerkleError::EmptyFile));
+    }
+
+    #[test]
+    fn parser_limits_deep_wide_and_oversized_inputs() {
+        let deep = format!(
+            "{}0:{}",
+            "l".repeat(MAX_BENCODE_DEPTH + 1),
+            "e".repeat(MAX_BENCODE_DEPTH + 1)
+        );
+        assert_eq!(parse_bencode(deep.as_bytes()), Err(BencodeError::TooDeep));
+
+        let mut wide = String::from("l");
+        wide.push_str(&"0:".repeat(MAX_BENCODE_NODES + 1));
+        wide.push('e');
+        assert_eq!(
+            parse_bencode(wide.as_bytes()),
+            Err(BencodeError::TooManyNodes)
+        );
+
+        let huge_magnet = format!(
+            "magnet:?xt=urn:btih:{}{}",
+            "00".repeat(20),
+            "&dn=x".repeat(MAX_MAGNET_PARAMETERS + 1)
+        );
+        assert_eq!(parse_magnet(&huge_magnet), Err(MagnetError::TooLarge));
+        assert_eq!(
+            sanitize_path_component(&"a".repeat(MAX_PATH_COMPONENT_BYTES + 1)),
+            Err(PathError::TooLong)
+        );
+    }
+
+    #[test]
+    fn adversarial_interop_inputs_remain_metadata_only() {
+        for malformed in [
+            b"i-0e".as_slice(),
+            b"i9223372036854775808e".as_slice(),
+            b"999999999999999999999999:x".as_slice(),
+            b"d1:ai1e1:ai2ee".as_slice(),
+            b"d1:bi1e1:ai2ee".as_slice(),
+            b"l1:a".as_slice(),
+        ] {
+            assert!(parse_bencode(malformed).is_err());
+            assert!(torrent_identity(malformed).is_err());
+        }
+        for magnet in [
+            "magnet:?xt=urn%ZZbtih%3Adead",
+            "magnet:?xt=urn:btih:00",
+            "magnet:?xt=urn:btmh:1220ff",
+            "magnet:?xt=%ff",
+        ] {
+            assert!(parse_magnet(magnet).is_err());
+        }
+        for path in ["..", "/root", "C:", "a/b", "a\\b", "NUL.txt", "x\0y"] {
+            assert!(sanitize_path_component(path).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_v2_tree_and_inconsistent_hybrid_are_rejected() {
+        let empty_tree = b"d4:infod9:file treede12:meta versioni2e12:piece lengthi16384eee";
+        assert!(matches!(
+            torrent_identity(empty_tree),
+            Err(MetainfoError::InvalidField("v2 file tree"))
+        ));
+
+        let vectors = vectors();
+        let hybrid = vectors
+            .torrents
+            .into_iter()
+            .find(|vector| vector.kind == TorrentKind::Hybrid)
+            .unwrap();
+        let encoded = hex::decode(hybrid.metainfo_hex).unwrap();
+        let needle = b"6:lengthi30e";
+        let offset = encoded
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        let mut inconsistent = encoded;
+        inconsistent[offset..offset + needle.len()].copy_from_slice(b"6:lengthi31e");
+        assert!(matches!(
+            torrent_identity(&inconsistent),
+            Err(MetainfoError::InvalidField("hybrid payload length"))
+        ));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn arbitrary_bounded_metadata_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..16384)) {
+            let _ = parse_bencode(&bytes);
+            let _ = torrent_identity(&bytes);
+        }
+
+        #[test]
+        fn arbitrary_text_never_panics(value in ".{0,4096}") {
+            let _ = parse_magnet(&value);
+            let _ = sanitize_path_component(&value);
+        }
     }
 }

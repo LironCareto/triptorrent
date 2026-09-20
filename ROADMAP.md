@@ -85,12 +85,15 @@ M6 selects an import-first design with verified BitTorrent aliases and an option
 
 M7 keeps the GUI, typed API client and daemon/runtime as separate crates. It reports the currently implemented M2 bootstrap and encrypted M4 relay path without claiming anonymity. Installers, OS services, production M3 discovery and M6 classic/dual networking remain future work.
 
-## M8 — Adversarial testing
-- fuzzing
-- protocol conformance
-- relay abuse
-- Sybil/eclipse simulation
-- traffic-analysis experiments
+## M8 — Adversarial testing (completed)
+- [x] deterministic parser regressions, property tests and optional fuzz targets
+- [x] experimental implementation-conformance vectors and state-machine adversaries
+- [x] bounded relay, bootstrap, local API, storage and interoperability abuse tests
+- [x] fixed-seed Monte Carlo Sybil/eclipse simulation across four candidates
+- [x] metadata-only traffic-analysis experiment and collusion matrix
+- [x] classified finding log and explicit M9 gate
+
+M8 fixed concrete fail-closed and resource-bound defects without redesigning the selected protocol. It recommends proceeding only to a controlled, clearly labelled M9 testnet. M2 spoofing, Sybil/eclipse exposure, metadata correlation and the limits of synthetic research remain explicit risks; no security or anonymity guarantee is made.
 
 ## M9 — Public testnet
 - versioned wire protocol

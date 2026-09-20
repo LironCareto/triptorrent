@@ -16,3 +16,19 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+  adversarial:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p triptorrent-protocol -p triptorrent-interop -p triptorrent-relay -p triptorrent-overlay -p triptorrent-node
+      - run: cargo run -p triptorrent-overlay --example m8_monte_carlo
+      - run: cargo run -p triptorrent-overlay --example m8_traffic_analysis
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked --version 0.13.2
+      - run: cargo fuzz run protocol -- -seed=270544960 -runs=1000
+      - run: cargo fuzz run interop -- -seed=573785173 -runs=1000

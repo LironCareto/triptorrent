@@ -1,8 +1,19 @@
 #![doc = "Experimental M1 file-transfer messages and serialization."]
 
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use thiserror::Error;
-use triptorrent_core::{Chunk, ContentId, Manifest, PROTOCOL_VERSION, PeerId};
+use triptorrent_core::{CHUNK_SIZE, Chunk, ContentId, Manifest, PROTOCOL_VERSION, PeerId};
+
+/// Maximum encoded application message accepted before Postcard decoding.
+pub const MAX_APPLICATION_MESSAGE_BYTES: usize = 1024 * 1024;
+/// Maximum encoded M2 control message accepted before Postcard decoding.
+pub const MAX_OVERLAY_MESSAGE_BYTES: usize = 256 * 1024;
+/// Maximum content identifiers in one temporary M2 peer advertisement.
+pub const MAX_ADVERTISED_CONTENT_IDS: usize = 256;
+const MAX_ERROR_TEXT_BYTES: usize = 1024;
+const MAX_CAPABILITIES: usize = 8;
+const MAX_DISCOVERY_ROUTES: usize = 16;
 
 /// A versioned M1 application message.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -220,6 +231,12 @@ pub enum ProtocolError {
     /// The peer used a different experimental protocol version.
     #[error("unsupported protocol version {0}")]
     UnsupportedVersion(u16),
+    /// A decoded value violates bounded semantic invariants.
+    #[error("invalid protocol message: {0}")]
+    InvalidMessage(&'static str),
+    /// The encoded input exceeds its boundary before decoding.
+    #[error("encoded protocol message exceeds {limit} bytes")]
+    MessageTooLarge { limit: usize },
 }
 
 /// Serializes a versioned message.
@@ -228,10 +245,13 @@ pub enum ProtocolError {
 ///
 /// Returns [`ProtocolError`] if serialization fails.
 pub fn encode(message: Message) -> Result<Vec<u8>, ProtocolError> {
-    Ok(postcard::to_allocvec(&Envelope {
+    validate_message(&message)?;
+    let encoded = postcard::to_allocvec(&Envelope {
         version: PROTOCOL_VERSION,
         message,
-    })?)
+    })?;
+    ensure_size(&encoded, MAX_APPLICATION_MESSAGE_BYTES)?;
+    Ok(encoded)
 }
 
 /// Deserializes a message and rejects unknown versions.
@@ -240,10 +260,12 @@ pub fn encode(message: Message) -> Result<Vec<u8>, ProtocolError> {
 ///
 /// Returns [`ProtocolError`] for malformed or incompatible input.
 pub fn decode(bytes: &[u8]) -> Result<Message, ProtocolError> {
+    ensure_size(bytes, MAX_APPLICATION_MESSAGE_BYTES)?;
     let envelope: Envelope = postcard::from_bytes(bytes)?;
     if envelope.version != PROTOCOL_VERSION {
         return Err(ProtocolError::UnsupportedVersion(envelope.version));
     }
+    validate_message(&envelope.message)?;
     Ok(envelope.message)
 }
 
@@ -253,10 +275,13 @@ pub fn decode(bytes: &[u8]) -> Result<Message, ProtocolError> {
 ///
 /// Returns [`ProtocolError`] if serialization fails.
 pub fn encode_overlay_request(request: OverlayRequest) -> Result<Vec<u8>, ProtocolError> {
-    Ok(postcard::to_allocvec(&OverlayRequestEnvelope {
+    validate_overlay_request(&request)?;
+    let encoded = postcard::to_allocvec(&OverlayRequestEnvelope {
         version: PROTOCOL_VERSION,
         request,
-    })?)
+    })?;
+    ensure_size(&encoded, MAX_OVERLAY_MESSAGE_BYTES)?;
+    Ok(encoded)
 }
 
 /// Decodes an experimental M2 bootstrap request.
@@ -265,8 +290,10 @@ pub fn encode_overlay_request(request: OverlayRequest) -> Result<Vec<u8>, Protoc
 ///
 /// Returns [`ProtocolError`] for malformed or incompatible input.
 pub fn decode_overlay_request(bytes: &[u8]) -> Result<OverlayRequest, ProtocolError> {
+    ensure_size(bytes, MAX_OVERLAY_MESSAGE_BYTES)?;
     let envelope: OverlayRequestEnvelope = postcard::from_bytes(bytes)?;
     verify_version(envelope.version)?;
+    validate_overlay_request(&envelope.request)?;
     Ok(envelope.request)
 }
 
@@ -276,10 +303,13 @@ pub fn decode_overlay_request(bytes: &[u8]) -> Result<OverlayRequest, ProtocolEr
 ///
 /// Returns [`ProtocolError`] if serialization fails.
 pub fn encode_overlay_response(response: OverlayResponse) -> Result<Vec<u8>, ProtocolError> {
-    Ok(postcard::to_allocvec(&OverlayResponseEnvelope {
+    validate_overlay_response(&response)?;
+    let encoded = postcard::to_allocvec(&OverlayResponseEnvelope {
         version: PROTOCOL_VERSION,
         response,
-    })?)
+    })?;
+    ensure_size(&encoded, MAX_OVERLAY_MESSAGE_BYTES)?;
+    Ok(encoded)
 }
 
 /// Decodes an experimental M2 bootstrap response.
@@ -288,9 +318,138 @@ pub fn encode_overlay_response(response: OverlayResponse) -> Result<Vec<u8>, Pro
 ///
 /// Returns [`ProtocolError`] for malformed or incompatible input.
 pub fn decode_overlay_response(bytes: &[u8]) -> Result<OverlayResponse, ProtocolError> {
+    ensure_size(bytes, MAX_OVERLAY_MESSAGE_BYTES)?;
     let envelope: OverlayResponseEnvelope = postcard::from_bytes(bytes)?;
     verify_version(envelope.version)?;
+    validate_overlay_response(&envelope.response)?;
     Ok(envelope.response)
+}
+
+fn ensure_size(bytes: &[u8], limit: usize) -> Result<(), ProtocolError> {
+    if bytes.len() > limit {
+        return Err(ProtocolError::MessageTooLarge { limit });
+    }
+    Ok(())
+}
+
+fn validate_message(message: &Message) -> Result<(), ProtocolError> {
+    match message {
+        Message::Manifest(manifest) => validate_manifest(manifest),
+        Message::Chunk(chunk) if chunk.data.len() > CHUNK_SIZE => Err(
+            ProtocolError::InvalidMessage("chunk payload exceeds fixed chunk size"),
+        ),
+        Message::Error(message) if message.len() > MAX_ERROR_TEXT_BYTES => {
+            Err(ProtocolError::InvalidMessage("error text exceeds bound"))
+        }
+        Message::SwarmManifest {
+            manifest,
+            availability,
+        } => {
+            validate_manifest(manifest)?;
+            if availability.chunk_count != u32::try_from(manifest.chunks.len()).unwrap_or(u32::MAX)
+                || !availability.is_valid()
+            {
+                return Err(ProtocolError::InvalidMessage(
+                    "piece availability does not match manifest",
+                ));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_manifest(manifest: &Manifest) -> Result<(), ProtocolError> {
+    manifest
+        .validate_shape()
+        .map_err(|_| ProtocolError::InvalidMessage("malformed manifest shape"))
+}
+
+fn valid_identifier(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn validate_assignment(assignment: &RouteAssignment) -> Result<(), ProtocolError> {
+    if !valid_identifier(&assignment.relay_id, 64)
+        || assignment.relay_address.len() > 128
+        || assignment.relay_address.parse::<SocketAddr>().is_err()
+        || !valid_identifier(&assignment.route, 128)
+    {
+        return Err(ProtocolError::InvalidMessage(
+            "invalid route assignment fields",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_overlay_request(request: &OverlayRequest) -> Result<(), ProtocolError> {
+    match request {
+        OverlayRequest::RegisterPeer(peer) => {
+            if peer.peer_id != PeerId::from_public_key(&peer.public_key) {
+                return Err(ProtocolError::InvalidMessage(
+                    "peer identity does not match key",
+                ));
+            }
+            if peer.content_ids.is_empty()
+                || peer.content_ids.len() > MAX_ADVERTISED_CONTENT_IDS
+                || peer.capabilities.is_empty()
+                || peer.capabilities.len() > MAX_CAPABILITIES
+            {
+                return Err(ProtocolError::InvalidMessage(
+                    "peer advertisement exceeds bounds",
+                ));
+            }
+            Ok(())
+        }
+        OverlayRequest::RegisterRelay(relay) => {
+            if !valid_identifier(&relay.relay_id, 64)
+                || relay.address.len() > 128
+                || relay.address.parse::<SocketAddr>().is_err()
+            {
+                return Err(ProtocolError::InvalidMessage("invalid relay advertisement"));
+            }
+            Ok(())
+        }
+        OverlayRequest::HeartbeatRelay { relay_id }
+        | OverlayRequest::ReportRelayFailure { relay_id } => {
+            if !valid_identifier(relay_id, 64) {
+                return Err(ProtocolError::InvalidMessage("invalid relay identifier"));
+            }
+            Ok(())
+        }
+        OverlayRequest::DiscoverProviders { limit, .. }
+            if *limit == 0 || usize::from(*limit) > MAX_DISCOVERY_ROUTES =>
+        {
+            Err(ProtocolError::InvalidMessage(
+                "invalid provider discovery limit",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_overlay_response(response: &OverlayResponse) -> Result<(), ProtocolError> {
+    match response {
+        OverlayResponse::Assignment(Some(assignment))
+        | OverlayResponse::Route(Some(assignment)) => validate_assignment(assignment),
+        OverlayResponse::Routes(routes) => {
+            if routes.len() > MAX_DISCOVERY_ROUTES {
+                return Err(ProtocolError::InvalidMessage("too many route assignments"));
+            }
+            for assignment in routes {
+                validate_assignment(assignment)?;
+            }
+            Ok(())
+        }
+        OverlayResponse::Error(message) if message.len() > MAX_ERROR_TEXT_BYTES => {
+            Err(ProtocolError::InvalidMessage("error text exceeds bound"))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn verify_version(version: u16) -> Result<(), ProtocolError> {
@@ -303,6 +462,29 @@ fn verify_version(version: u16) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct ConformanceVectors {
+        status: String,
+        application: Vec<ApplicationVector>,
+        framing: Vec<FramingVector>,
+    }
+
+    #[derive(Deserialize)]
+    struct ApplicationVector {
+        name: String,
+        hex: String,
+        result: String,
+    }
+
+    #[derive(Deserialize)]
+    struct FramingVector {
+        name: String,
+        length_hex: String,
+        result: String,
+    }
 
     #[test]
     fn messages_round_trip() {
@@ -409,5 +591,100 @@ mod tests {
             decode_overlay_response(&encode_overlay_response(response.clone()).unwrap()).unwrap(),
             response
         );
+    }
+
+    #[test]
+    fn malformed_manifest_and_availability_fail_before_state_allocation() {
+        let malformed = Manifest {
+            content_id: ContentId::digest(b"malformed"),
+            length: 1,
+            chunk_size: 0,
+            chunks: Vec::new(),
+        };
+        assert!(matches!(
+            encode(Message::Manifest(malformed)),
+            Err(ProtocolError::InvalidMessage(_))
+        ));
+
+        let (manifest, _) = Manifest::from_bytes(b"one chunk").unwrap();
+        let availability = PieceAvailability {
+            chunk_count: 1,
+            bits: vec![0x80],
+        };
+        assert!(matches!(
+            encode(Message::SwarmManifest {
+                manifest,
+                availability
+            }),
+            Err(ProtocolError::InvalidMessage(_))
+        ));
+    }
+
+    #[test]
+    fn oversized_encoded_input_is_rejected_before_decoding() {
+        let oversized = vec![0_u8; MAX_APPLICATION_MESSAGE_BYTES + 1];
+        assert!(matches!(
+            decode(&oversized),
+            Err(ProtocolError::MessageTooLarge { .. })
+        ));
+        let oversized = vec![0_u8; MAX_OVERLAY_MESSAGE_BYTES + 1];
+        assert!(matches!(
+            decode_overlay_request(&oversized),
+            Err(ProtocolError::MessageTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn experimental_m8_conformance_vectors_match_current_codec() {
+        let vectors: ConformanceVectors = serde_json::from_str(include_str!(
+            "../../../test-vectors/m8-experimental-conformance.json"
+        ))
+        .unwrap();
+        assert!(vectors.status.starts_with("experimental M8"));
+        for vector in vectors.application {
+            let result = decode(&hex::decode(&vector.hex).unwrap());
+            match vector.result.as_str() {
+                "complete" => assert_eq!(result.unwrap(), Message::Complete, "{}", vector.name),
+                "swarm_complete" => {
+                    assert_eq!(result.unwrap(), Message::SwarmComplete, "{}", vector.name);
+                }
+                "reject" => assert!(result.is_err(), "{}", vector.name),
+                other => panic!("unknown vector result {other}"),
+            }
+        }
+        for vector in vectors.framing {
+            let length = hex::decode(&vector.length_hex).unwrap();
+            match vector.name.as_str() {
+                "empty-frame" => {
+                    assert_eq!(u32::from_be_bytes(length.try_into().unwrap()), 0);
+                    assert!(decode(&[]).is_err());
+                }
+                "truncated-length" => assert!(length.len() < std::mem::size_of::<u32>()),
+                "oversized-application" => assert!(
+                    usize::try_from(u32::from_be_bytes(length.try_into().unwrap())).unwrap()
+                        > MAX_APPLICATION_MESSAGE_BYTES
+                ),
+                "oversized-control" => assert!(
+                    usize::try_from(u32::from_be_bytes(length.try_into().unwrap())).unwrap()
+                        > MAX_OVERLAY_MESSAGE_BYTES
+                ),
+                other => panic!("unknown framing vector {other}"),
+            }
+            assert!(matches!(
+                vector.result.as_str(),
+                "decode_reject" | "frame_reject"
+            ));
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn arbitrary_bounded_protocol_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..8192)) {
+            let _ = decode(&bytes);
+            let _ = decode_overlay_request(&bytes);
+            let _ = decode_overlay_response(&bytes);
+        }
     }
 }

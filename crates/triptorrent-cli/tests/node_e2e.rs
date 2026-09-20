@@ -627,6 +627,99 @@ fn node_lifecycle_storage_configuration_and_api_errors() {
 }
 
 #[test]
+fn node_local_api_rejects_adversarial_requests_and_survives() {
+    let _guard = guard();
+    let directory = tempdir().expect("create test directory");
+    let api = free_addresses(1)[0];
+    let config = directory.path().join("node.toml");
+    let data = directory.path().join("data");
+    init_node(
+        directory.path(),
+        "adversarial-init",
+        &config,
+        &data,
+        api,
+        None,
+    );
+    let config_text = fs::read_to_string(&config).unwrap();
+    let token = config_text
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("api_token = \"")
+                .map(|v| v.trim_end_matches('"'))
+        })
+        .unwrap()
+        .to_owned();
+    let mut node = start_node(directory.path(), "adversarial-node", &config, api);
+
+    let hostile = [
+        (
+            b"POST /v1/shutdown HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            401,
+        ),
+        (
+            b"POST /v1/shutdown HTTP/1.1\r\nHost: localhost\r\nAuthorization: Token wrong\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            401,
+        ),
+        (
+            b"GET /v1/health HTTP/1.1\r\nmalformed\r\n\r\n".as_slice(),
+            400,
+        ),
+        (
+            b"POST /v1/content HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n".as_slice(),
+            400,
+        ),
+        (
+            b"GET /v1/unknown HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
+            404,
+        ),
+        (
+            b"PUT /v1/shutdown HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
+            404,
+        ),
+        (
+            b"POST /v1/content HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1048577\r\n\r\n".as_slice(),
+            400,
+        ),
+        (
+            b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\nGET /v1/status HTTP/1.1\r\n\r\n".as_slice(),
+            400,
+        ),
+    ];
+    for (request, expected_status) in hostile {
+        let (status, body) = raw_request(api, request);
+        assert_eq!(status, expected_status, "{body}");
+        assert!(!body.to_string().contains(&token));
+        node.assert_running();
+    }
+
+    let traversal = format!(
+        "DELETE /v1/content/..?delete_bytes=true HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n"
+    );
+    let (status, body) = raw_request(api, traversal.as_bytes());
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "invalid_operation");
+    assert!(data.exists());
+    node.assert_running();
+
+    let duplicate_query = format!(
+        "DELETE /v1/content/{}?delete_bytes=false&delete_bytes=true HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n",
+        ContentId::digest(b"missing")
+    );
+    let (status, _) = raw_request(api, duplicate_query.as_bytes());
+    assert_eq!(status, 400);
+    node.assert_running();
+
+    let (status, health) = raw_request(
+        api,
+        b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, 200);
+    assert_eq!(health["alive"], true);
+    stop_node(directory.path(), "adversarial", &config, node);
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn node_resumes_then_serves_after_restart_while_fetching() {
     let _guard = guard();

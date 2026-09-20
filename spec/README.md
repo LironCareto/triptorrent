@@ -55,6 +55,12 @@ A receiver compares all connected provider manifests byte-for-byte and fails clo
 
 The current resume files and bandwidth-limit algorithm are local implementation details, not wire protocol. No M4 message is stable or normative; see [RFC 0003](../rfcs/0003-m4-swarm-transfer.md).
 
+## Experimental M8 validation constraints
+
+The current implementation rejects encoded application messages above 1 MiB and M2 control messages above 256 KiB before Postcard decoding. A manifest must use the fixed 32 KiB chunk size, contain exactly enough ordered chunk digests for its declared nonzero length, and stay within the prototype's 32 GiB / 1,048,576-chunk bound. Chunk payload length and digest, availability length and zero padding, peer identity/public-key binding, route syntax, discovery-result count, capability count and error-text size are validated before state is accepted.
+
+Relay framing accepts at most 1 MiB opaque frames and restricted 128-byte route identifiers. These sizes are current experimental behavior, not stable protocol parameters. Unsupported versions, unknown enum variants, truncated inputs, inconsistent manifests and out-of-range state fail closed. The [experimental M8 conformance vectors](../test-vectors/m8-experimental-conformance.json) document implemented examples for independent inspection but do not make version 0 normative or stable.
+
 ## M5 implementation boundary
 
 The persistent node, SQLite schema, managed directory layout, TOML configuration, structured logs and `/v1` loopback control API are reference-implementation behavior. M5 changes no TripTorrent wire message, discovery record or peer-identity rule. In particular, restarting a local node creates fresh ephemeral M2 advertisements and routes rather than restoring network sessions or introducing a durable protocol identity.

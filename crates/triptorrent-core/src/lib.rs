@@ -11,6 +11,12 @@ pub const PROTOCOL_VERSION: u16 = 0;
 /// Fixed chunk size used by the experimental M1 content model.
 pub const CHUNK_SIZE: usize = 32 * 1024;
 
+/// Maximum chunk count accepted by the experimental manifest implementation.
+pub const MAX_MANIFEST_CHUNKS: usize = 1_048_576;
+
+/// Maximum content length represented by one experimental manifest.
+pub const MAX_CONTENT_LENGTH: u64 = 32 * 1024 * 1_048_576;
+
 /// A temporary BLAKE3 identifier for complete file bytes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct ContentId([u8; 32]);
@@ -119,6 +125,15 @@ pub enum ContentError {
     /// A file had more chunks than the M1 index can represent.
     #[error("content has more than u32::MAX chunks")]
     TooManyChunks,
+    /// The manifest does not use the fixed experimental chunk size.
+    #[error("manifest uses an unsupported chunk size")]
+    InvalidChunkSize,
+    /// Length and chunk count do not describe the same byte sequence.
+    #[error("manifest length and chunk count are inconsistent")]
+    InvalidManifestShape,
+    /// The manifest exceeds the explicit prototype content bound.
+    #[error("content exceeds the experimental size limit")]
+    ContentTooLarge,
 }
 
 /// Invalid textual content identifier.
@@ -139,6 +154,9 @@ impl Manifest {
     ///
     /// Returns [`ContentError::TooManyChunks`] when M1's 32-bit index is insufficient.
     pub fn from_bytes(bytes: &[u8]) -> Result<(Self, Vec<Chunk>), ContentError> {
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CONTENT_LENGTH {
+            return Err(ContentError::ContentTooLarge);
+        }
         let chunks: Vec<Chunk> = bytes
             .chunks(CHUNK_SIZE)
             .enumerate()
@@ -157,6 +175,25 @@ impl Manifest {
             chunks: chunks.iter().map(|chunk| chunk.id).collect(),
         };
         Ok((manifest, chunks))
+    }
+
+    /// Checks the structural invariants required before allocating transfer state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContentError`] for unsupported size, chunk size, or inconsistent length.
+    pub fn validate_shape(&self) -> Result<(), ContentError> {
+        if usize::try_from(self.chunk_size).ok() != Some(CHUNK_SIZE) {
+            return Err(ContentError::InvalidChunkSize);
+        }
+        if self.length > MAX_CONTENT_LENGTH || self.chunks.len() > MAX_MANIFEST_CHUNKS {
+            return Err(ContentError::ContentTooLarge);
+        }
+        let expected = self.length.div_ceil(u64::from(self.chunk_size));
+        if usize::try_from(expected).ok() != Some(self.chunks.len()) {
+            return Err(ContentError::InvalidManifestShape);
+        }
+        Ok(())
     }
 
     /// Verifies the index and digest of one chunk.
@@ -240,5 +277,31 @@ mod tests {
         let (manifest, chunks) = Manifest::from_bytes(&[]).unwrap();
         assert!(chunks.is_empty());
         assert_eq!(manifest.reconstruct(&chunks).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn hostile_manifest_shape_is_rejected_before_transfer_allocation() {
+        let content_id = ContentId::digest(b"shape");
+        let invalid = Manifest {
+            content_id,
+            length: 1,
+            chunk_size: 0,
+            chunks: Vec::new(),
+        };
+        assert!(matches!(
+            invalid.validate_shape(),
+            Err(ContentError::InvalidChunkSize)
+        ));
+
+        let oversized = Manifest {
+            content_id,
+            length: MAX_CONTENT_LENGTH + 1,
+            chunk_size: u32::try_from(CHUNK_SIZE).unwrap(),
+            chunks: Vec::new(),
+        };
+        assert!(matches!(
+            oversized.validate_shape(),
+            Err(ContentError::ContentTooLarge)
+        ));
     }
 }

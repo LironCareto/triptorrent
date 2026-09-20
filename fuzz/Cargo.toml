@@ -1,0 +1,27 @@
+[package]
+name = "triptorrent-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+triptorrent-interop = { path = "../crates/triptorrent-interop" }
+triptorrent-protocol = { path = "../crates/triptorrent-protocol" }
+
+[[bin]]
+name = "protocol"
+path = "fuzz_targets/protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interop"
+path = "fuzz_targets/interop.rs"
+test = false
+doc = false
+bench = false

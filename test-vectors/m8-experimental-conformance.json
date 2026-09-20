@@ -1,0 +1,16 @@
+{
+  "status": "experimental M8 conformance vectors; not a stable protocol",
+  "application": [
+    { "name": "v0-complete", "hex": "0003", "result": "complete" },
+    { "name": "v0-swarm-complete", "hex": "0009", "result": "swarm_complete" },
+    { "name": "truncated-envelope", "hex": "00", "result": "reject" },
+    { "name": "unsupported-v1", "hex": "0103", "result": "reject" },
+    { "name": "unknown-kind", "hex": "00ff01", "result": "reject" }
+  ],
+  "framing": [
+    { "name": "empty-frame", "length_hex": "00000000", "result": "decode_reject" },
+    { "name": "truncated-length", "length_hex": "0000", "result": "frame_reject" },
+    { "name": "oversized-application", "length_hex": "00100001", "result": "frame_reject" },
+    { "name": "oversized-control", "length_hex": "00040001", "result": "frame_reject" }
+  ]
+}

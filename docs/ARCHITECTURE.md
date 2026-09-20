@@ -125,3 +125,11 @@ The desktop controller performs API and process work on a background thread. It 
 The local API now reports typed content identities, advertised state, verified bytes/chunks, measured verified-byte rate, provider/retry/rejection contribution, and the active network path. Cooperative pause stops new chunk scheduling, releases sessions and preserves M4 partial state; resume starts a fresh discovery session after revalidating completed chunks. A persisted `paused` state is excluded from automatic interrupted-transfer recovery.
 
 The structured privacy model labels the actual M2 discovery and M4 relay path and explicitly marks M3 private discovery and M6 classic networking inactive. This is an implementation API extension, not a wire-protocol change. See [ADR 0008](adr/0008-m7-local-api-desktop-client.md) and the [M7 guide](M7_DESKTOP_CLIENT.md).
+
+## M8 adversarial validation boundary
+
+M8 leaves the M1-M7 architecture intact and makes implementation resource policies explicit. Application/control messages, manifests, interop metadata, relay routes, bootstrap registries, local API connections and resume state now have bounded sizes or counts. Validation occurs before allocation, path derivation or state promotion where practical. Malformed connections fail independently; verified bytes and authenticated mutation state cannot be created by parser success alone.
+
+The `fuzz/` package is isolated from the stable workspace so long libFuzzer campaigns do not affect Windows development or normal CI. Stable deterministic regressions and property tests remain in their owning crates. `triptorrent-overlay::research` adds fixed-seed Monte Carlo scenarios, while `traffic_analysis` is a synthetic metadata-only model using real encoded message sizes. Neither is a production networking component.
+
+The bounds are reference-implementation policy for the current prototype, except where [the draft specification](../spec/README.md) records current experimental wire validity. M2 remains unauthenticated scaffolding, and M8 does not add identity cost, traffic padding, cover traffic, public-testnet operations or production M3 discovery. See the [M8 report](M8_ADVERSARIAL_TESTING.md).

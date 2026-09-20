@@ -16,6 +16,8 @@ There is no stable wire protocol yet and there are currently **no security or an
 
 ## Current prototype
 
+M8 completes adversarial validation across protocol, relay, bootstrap, local API, storage and offline interoperability boundaries. It adds explicit resource bounds, deterministic/property regressions, optional fuzz targets, seeded Sybil/eclipse simulations and a metadata-only traffic model. The result is **READY FOR M9** only as a controlled, clearly experimental testnet; it is not an anonymity or security claim. See the [M8 testing report](docs/M8_ADVERSARIAL_TESTING.md) and [finding log](docs/M8_FINDINGS.md).
+
 M7 adds a native reference desktop client built with `egui`/`eframe`. It connects to the persistent node through the same typed, authenticated local API as the CLI, can start the node sidecar, manages the library, starts fetches, shows verified progress, and genuinely pauses/resumes downloads. Build the workspace and launch the two adjacent executables:
 
 ```bash
@@ -84,6 +86,8 @@ Manual M1 `--relay`, `--route` and `--key` commands remain available for regress
 ## Testing
 
 `cargo test --workspace` is the complete milestone validation. It includes real child-process tests for the CLI, desktop controller, daemon/API lifecycle, authentication, persistent storage, restart recovery, pause/resume, verified progress, multi-source transfer, serving after restart and simultaneous upload/download. Manual UI or multi-terminal demos are optional debugging tools rather than acceptance requirements.
+
+M8's seeded discovery and traffic experiments run with `cargo run -p triptorrent-overlay --example m8_monte_carlo` and `cargo run -p triptorrent-overlay --example m8_traffic_analysis`. Optional long fuzz campaigns are documented in the [M8 report](docs/M8_ADVERSARIAL_TESTING.md).
 
 ## Compatibility with the BitTorrent ecosystem
 
@@ -154,6 +158,8 @@ Protocol changes that affect interoperability should be documented before they b
 - [M5 persistent node](docs/M5_PERSISTENT_NODE.md)
 - [M6 BitTorrent interoperability research](docs/M6_BITTORRENT_INTEROP_RESEARCH.md)
 - [M7 reference desktop client](docs/M7_DESKTOP_CLIENT.md)
+- [M8 adversarial testing](docs/M8_ADVERSARIAL_TESTING.md)
+- [M8 findings](docs/M8_FINDINGS.md)
 - [Related work](docs/RELATED_WORK.md)
 - [Design principles](docs/DESIGN_PRINCIPLES.md)
 - [Roadmap](ROADMAP.md)

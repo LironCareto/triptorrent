@@ -12,5 +12,10 @@ serde.workspace = true
 thiserror.workspace = true
 triptorrent-core = { path = "../triptorrent-core" }
 
+[dev-dependencies]
+hex.workspace = true
+proptest.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true

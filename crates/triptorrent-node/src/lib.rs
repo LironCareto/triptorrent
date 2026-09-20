@@ -24,6 +24,10 @@ use triptorrent_node_api::{LocalApiClient, LocalApiConnection};
 
 const API_MAX_REQUEST: usize = 1024 * 1024;
 const API_TIMEOUT: Duration = Duration::from_secs(5);
+const API_MAX_CONNECTIONS: usize = 64;
+const API_MAX_TARGET: usize = 2_048;
+const API_MAX_ERROR: usize = 1_024;
+const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 const SCHEMA_VERSION: i64 = 2;
 const FETCH_RUNNING: u8 = 0;
 const FETCH_PAUSED: u8 = 1;
@@ -141,7 +145,7 @@ pub trait TransferEngine: Send + Sync {
 }
 
 /// Persistent daemon configuration.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct NodeConfig {
     /// Managed state and content root.
@@ -160,6 +164,22 @@ pub struct NodeConfig {
     pub log_level: String,
     /// Bearer token required for mutating API calls.
     pub api_token: String,
+}
+
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeConfig")
+            .field("data_dir", &self.data_dir)
+            .field("api_listen", &self.api_listen)
+            .field("bootstrap", &self.bootstrap)
+            .field("download_limit", &self.download_limit)
+            .field("upload_limit", &self.upload_limit)
+            .field("max_concurrent_transfers", &self.max_concurrent_transfers)
+            .field("log_level", &self.log_level)
+            .field("api_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Default for NodeConfig {
@@ -213,6 +233,9 @@ impl NodeConfig {
     ///
     /// Returns an error for missing, malformed, unsafe, or incomplete configuration.
     pub fn load(path: &Path, overrides: &ConfigOverrides) -> Result<Self> {
+        if fs::metadata(path)?.len() > MAX_CONFIG_BYTES {
+            bail!("node config exceeds 64 KiB limit");
+        }
         let encoded = fs::read_to_string(path)
             .with_context(|| format!("failed to read node config {}", path.display()))?;
         let config: Self = toml::from_str(&encoded)
@@ -311,6 +334,12 @@ impl NodeConfig {
         }
         if self.max_concurrent_transfers == 0 {
             bail!("max_concurrent_transfers must be at least one");
+        }
+        if self.max_concurrent_transfers > 128 {
+            bail!("max_concurrent_transfers must not exceed 128");
+        }
+        if self.api_token.len() > 512 || self.log_level.len() > 256 {
+            bail!("configuration text field exceeds its limit");
         }
         Ok(())
     }
@@ -518,17 +547,19 @@ impl Store {
     }
 
     fn remove_content(&self, content_id: &str, delete_bytes: bool) -> Result<()> {
-        if self.get_content(content_id)?.is_none() {
+        let parsed = ContentId::from_str(content_id).context("invalid content ID")?;
+        let content_id = parsed.to_string();
+        if self.get_content(&content_id)?.is_none() {
             bail!("unknown content ID {content_id}");
         }
         let connection = self
             .connection
             .lock()
             .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
-        connection.execute("DELETE FROM content WHERE content_id=?1", [content_id])?;
+        connection.execute("DELETE FROM content WHERE content_id=?1", [&content_id])?;
         drop(connection);
         if delete_bytes {
-            let directory = self.content_directory(content_id);
+            let directory = self.content_directory(&content_id);
             if directory.exists() {
                 fs::remove_dir_all(directory)?;
             }
@@ -554,6 +585,12 @@ impl Store {
                 .collect::<std::result::Result<_, _>>()?
         };
         for (content_id, data_relative, manifest_relative) in rows {
+            let parsed = ContentId::from_str(&content_id).with_context(|| {
+                format!("invalid content ID indexed in local state: {content_id}")
+            })?;
+            if parsed.to_string() != content_id {
+                bail!("non-canonical content ID indexed in local state");
+            }
             let data_path = managed_path(&self.root, &data_relative)
                 .with_context(|| format!("invalid data path indexed for {content_id}"))?;
             let manifest_path = managed_path(&self.root, &manifest_relative)
@@ -806,8 +843,18 @@ impl Store {
 }
 
 fn content_from_row(row: &rusqlite::Row<'_>, root: &Path) -> rusqlite::Result<ContentRecord> {
+    let content_id: String = row.get(0)?;
+    if ContentId::from_str(&content_id)
+        .ok()
+        .is_none_or(|parsed| parsed.to_string() != content_id)
+    {
+        return Err(invalid_sql_value(0, "invalid stored content ID"));
+    }
     let length: i64 = row.get(1)?;
     let chunks: i64 = row.get(2)?;
+    let length = u64::try_from(length).map_err(|_| invalid_sql_value(1, "negative length"))?;
+    let chunk_count =
+        usize::try_from(chunks).map_err(|_| invalid_sql_value(2, "negative chunk count"))?;
     let relative: String = row.get(3)?;
     let data_path = managed_path(root, &relative).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -821,14 +868,14 @@ fn content_from_row(row: &rusqlite::Row<'_>, root: &Path) -> rusqlite::Result<Co
         )
     })?;
     Ok(ContentRecord {
-        content_id: row.get(0)?,
+        content_id: content_id.clone(),
         identities: vec![ContentIdentity {
             namespace: "triptorrent".into(),
-            value: row.get(0)?,
+            value: content_id,
             verification: "verified".into(),
         }],
-        length: u64::try_from(length).unwrap_or(0),
-        chunk_count: usize::try_from(chunks).unwrap_or(0),
+        length,
+        chunk_count,
         data_path,
         shared: row.get::<_, i64>(4)? != 0,
         advertised: false,
@@ -854,25 +901,57 @@ fn transfer_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRecord
     let provider_contributions = serde_json::from_str(&contributions).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(error))
     })?;
+    let content_id: String = row.get(1)?;
+    if ContentId::from_str(&content_id).is_err() {
+        return Err(invalid_sql_value(1, "invalid transfer content ID"));
+    }
+    let direction: String = row.get(2)?;
+    let status: String = row.get(3)?;
+    if direction != "download"
+        || !matches!(
+            status.as_str(),
+            "running" | "pausing" | "paused" | "interrupted" | "completed" | "failed"
+        )
+    {
+        return Err(invalid_sql_value(2, "invalid transfer state"));
+    }
     Ok(TransferRecord {
         id: row.get(0)?,
-        content_id: row.get(1)?,
-        direction: row.get(2)?,
-        status: row.get(3)?,
-        bytes_total: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-        bytes_transferred: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
-        verified_chunks: usize::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
-        total_chunks: usize::try_from(row.get::<_, i64>(7)?).unwrap_or(0),
-        current_rate_bps: u64::try_from(row.get::<_, i64>(8)?).unwrap_or(0),
-        provider_count: usize::try_from(row.get::<_, i64>(9)?).unwrap_or(0),
-        retry_count: usize::try_from(row.get::<_, i64>(10)?).unwrap_or(0),
-        rejected_chunks: usize::try_from(row.get::<_, i64>(11)?).unwrap_or(0),
+        content_id,
+        direction,
+        status,
+        bytes_total: checked_sql_u64(row, 4)?,
+        bytes_transferred: checked_sql_u64(row, 5)?,
+        verified_chunks: checked_sql_usize(row, 6)?,
+        total_chunks: checked_sql_usize(row, 7)?,
+        current_rate_bps: checked_sql_u64(row, 8)?,
+        provider_count: checked_sql_usize(row, 9)?,
+        retry_count: checked_sql_usize(row, 10)?,
+        rejected_chunks: checked_sql_usize(row, 11)?,
         provider_contributions,
-        resumed_chunks: usize::try_from(row.get::<_, i64>(13)?).unwrap_or(0),
+        resumed_chunks: checked_sql_usize(row, 13)?,
         error: row.get(14)?,
         share_on_complete: row.get::<_, i64>(15)? != 0,
         network_path: row.get(16)?,
     })
+}
+
+fn checked_sql_u64(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    u64::try_from(row.get::<_, i64>(index)?)
+        .map_err(|_| invalid_sql_value(index, "negative unsigned field"))
+}
+
+fn checked_sql_usize(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<usize> {
+    usize::try_from(row.get::<_, i64>(index)?)
+        .map_err(|_| invalid_sql_value(index, "negative unsigned field"))
+}
+
+fn invalid_sql_value(index: usize, message: &'static str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, message).into(),
+    )
 }
 
 enum IntegrityFailure {
@@ -1315,15 +1394,22 @@ pub fn run_daemon(config: &NodeConfig, engine: Arc<dyn TransferEngine>) -> Resul
     let listener = TcpListener::bind(config.api_listen)
         .with_context(|| format!("failed to bind local API at {}", config.api_listen))?;
     listener.set_nonblocking(true)?;
+    let api_connections = Arc::new(AtomicUsize::new(0));
     info!(event = "node_started", api = %config.api_listen, data_dir = %config.data_dir.display());
     while !runtime.shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, address)) => {
+                if api_connections.load(Ordering::Relaxed) >= API_MAX_CONNECTIONS {
+                    continue;
+                }
+                api_connections.fetch_add(1, Ordering::Relaxed);
                 let runtime = Arc::clone(&runtime);
+                let api_connections = Arc::clone(&api_connections);
                 thread::spawn(move || {
                     if let Err(error) = handle_connection(stream, address.ip(), &runtime) {
                         warn!(event = "api_error", error = %error);
                     }
+                    api_connections.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1489,7 +1575,21 @@ fn delete_content_request(
     query: &str,
 ) -> Result<(u16, Value)> {
     let content_id = path.trim_start_matches("/v1/content/");
-    let delete_bytes = query.split('&').any(|item| item == "delete_bytes=true");
+    let mut delete_bytes = None;
+    for parameter in query.split('&').filter(|parameter| !parameter.is_empty()) {
+        let (name, value) = parameter
+            .split_once('=')
+            .context("malformed query parameter")?;
+        if name != "delete_bytes" || delete_bytes.is_some() {
+            bail!("unknown or duplicate query parameter");
+        }
+        delete_bytes = Some(
+            value
+                .parse::<bool>()
+                .context("invalid delete_bytes value")?,
+        );
+    }
+    let delete_bytes = delete_bytes.unwrap_or(false);
     runtime.remove_content(content_id, delete_bytes)?;
     Ok((
         200,
@@ -1532,7 +1632,17 @@ const fn default_true() -> bool {
 }
 
 fn error_json(code: &str, message: &str) -> Value {
-    json!({"error": {"code": code, "message": message}})
+    let end = message
+        .char_indices()
+        .take_while(|(index, _)| *index < API_MAX_ERROR)
+        .last()
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let bounded = if message.len() > API_MAX_ERROR {
+        &message[..end]
+    } else {
+        message
+    };
+    json!({"error": {"code": code, "message": bounded}})
 }
 
 fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
@@ -1558,32 +1668,49 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().context("missing HTTP method")?.to_owned();
     let target = parts.next().context("missing HTTP target")?.to_owned();
+    let version = parts.next().context("missing HTTP version")?;
+    if version != "HTTP/1.1" || parts.next().is_some() || target.len() > API_MAX_TARGET {
+        bail!("invalid HTTP request line");
+    }
     let mut content_length = 0_usize;
     let mut authorization = None;
+    let mut saw_content_length = false;
     for line in lines.filter(|line| !line.is_empty()) {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().context("invalid Content-Length")?;
-            } else if name.eq_ignore_ascii_case("authorization") {
-                authorization = Some(value.trim().to_owned());
+        let (name, value) = line.split_once(':').context("malformed HTTP header")?;
+        if name.eq_ignore_ascii_case("content-length") {
+            if saw_content_length {
+                bail!("duplicate Content-Length header");
             }
+            saw_content_length = true;
+            content_length = value.trim().parse().context("invalid Content-Length")?;
+        } else if name.eq_ignore_ascii_case("authorization") {
+            if authorization.is_some() {
+                bail!("duplicate Authorization header");
+            }
+            authorization = Some(value.trim().to_owned());
         }
     }
-    if header_end.saturating_add(content_length) > API_MAX_REQUEST {
+    let request_end = header_end
+        .checked_add(content_length)
+        .context("HTTP request length overflow")?;
+    if request_end > API_MAX_REQUEST || bytes.len() > request_end {
         bail!("API request is too large");
     }
-    while bytes.len() < header_end + content_length {
+    while bytes.len() < request_end {
         let read = stream.read(&mut buffer)?;
         if read == 0 {
             bail!("client closed before sending request body");
         }
         bytes.extend_from_slice(&buffer[..read]);
     }
+    if bytes.len() != request_end {
+        bail!("trailing or pipelined request bytes are not accepted");
+    }
     Ok(HttpRequest {
         method,
         target,
         authorization,
-        body: bytes[header_end..header_end + content_length].to_vec(),
+        body: bytes[header_end..request_end].to_vec(),
     })
 }
 
@@ -1778,5 +1905,64 @@ mod tests {
         ] {
             assert!(columns.iter().any(|column| column == expected));
         }
+    }
+
+    #[test]
+    fn corrupt_database_identifiers_cannot_escape_managed_storage() {
+        let directory = tempdir().unwrap();
+        let data = directory.path().join("data");
+        let sentinel = data.join("sentinel.txt");
+        let store = Store::open(&data).unwrap();
+        fs::write(&sentinel, b"must survive").unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO content(content_id,length,chunk_count,data_path,manifest_path,shared,complete,integrity,created_at)
+                     VALUES('..',0,0,'content/../sentinel.txt','content/../sentinel.txt',0,0,'ok',0)",
+                    [],
+                )
+                .unwrap();
+        }
+        assert!(store.remove_content("..", true).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must survive");
+        assert!(store.list_content().is_err());
+    }
+
+    #[test]
+    fn corrupt_transfer_numeric_state_fails_closed() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(&directory.path().join("data")).unwrap();
+        let content_id = ContentId::digest(b"transfer").to_string();
+        {
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO transfers(content_id,direction,status,bytes_total,bytes_transferred,
+                     verified_chunks,total_chunks,current_rate_bps,provider_count,retry_count,
+                     rejected_chunks,provider_contributions,resumed_chunks,share_on_complete,created_at,updated_at)
+                     VALUES(?1,'download','running',-1,0,0,0,0,0,0,0,'[]',0,0,0,0)",
+                    [content_id],
+                )
+                .unwrap();
+        }
+        assert!(store.list_transfers().is_err());
+    }
+
+    #[test]
+    fn configuration_debug_output_redacts_token_and_size_is_bounded() {
+        let directory = tempdir().unwrap();
+        let config = NodeConfig::initialized(directory.path().join("data")).unwrap();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&config.api_token));
+
+        let path = directory.path().join("oversized.toml");
+        fs::write(
+            &path,
+            vec![b'a'; usize::try_from(MAX_CONFIG_BYTES + 1).unwrap()],
+        )
+        .unwrap();
+        assert!(NodeConfig::load(&path, &ConfigOverrides::default()).is_err());
     }
 }

@@ -156,6 +156,8 @@ pub struct ResearchMetrics {
     pub adversary_both_sides: usize,
     /// Lookups linkable by colluding malicious lookup and storage nodes.
     pub colluding_adversary_both_sides: usize,
+    /// Failed lookups in which at least one malicious node occupied the observed path.
+    pub eclipsed_lookups: usize,
     /// Content keys for which a malicious node observed at least two lookups.
     pub repeated_key_linkability: usize,
     /// Repeated keys linkable to the same requester network location.
@@ -183,6 +185,30 @@ pub struct ResearchResult {
     pub candidate: DiscoveryCandidate,
     /// Collected metrics.
     pub metrics: ResearchMetrics,
+}
+
+/// Tunable parameters used by M8 seeded adversarial experiments.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResearchTuning {
+    /// Reproducible topology/workload seed.
+    pub seed: u64,
+    /// Record replicas selected around each lookup key.
+    pub replica_count: usize,
+    /// Independent paths used by the separated multi-stage candidate.
+    pub separated_lookup_paths: usize,
+    /// Percentage of each routing table deliberately replaced by attacker contacts.
+    pub routing_contamination_percent: u8,
+}
+
+impl Default for ResearchTuning {
+    fn default() -> Self {
+        Self {
+            seed: 0,
+            replica_count: K_BUCKET_SIZE,
+            separated_lookup_paths: 3,
+            routing_contamination_percent: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -261,39 +287,85 @@ pub fn run_default_research_suite() -> Vec<ResearchResult> {
 /// group. The built-in scenarios satisfy these invariants.
 #[must_use]
 pub fn simulate(scenario: ResearchScenario, candidate: DiscoveryCandidate) -> ResearchResult {
+    simulate_with_tuning(scenario, candidate, ResearchTuning::default())
+}
+
+/// Runs one reproducible M8 scenario with explicit topology and defense tuning.
+///
+/// # Panics
+///
+/// Panics for an unusable scenario or zero replica/path settings.
+#[must_use]
+#[allow(clippy::too_many_lines)] // Keeping one visible loop makes every accumulated metric auditable.
+pub fn simulate_with_tuning(
+    scenario: ResearchScenario,
+    candidate: DiscoveryCandidate,
+    tuning: ResearchTuning,
+) -> ResearchResult {
     assert!(scenario.ordinary_nodes > K_BUCKET_SIZE);
     assert!(scenario.contents > 0);
     assert!(scenario.lookups_per_content > 0);
     assert!(scenario.sybil_nodes == 0 || scenario.sybil_groups > 0);
+    assert!(tuning.replica_count > 0);
+    assert!(tuning.separated_lookup_paths > 0);
+    assert!(tuning.routing_contamination_percent <= 100);
 
-    let policy = candidate.policy();
-    let first_key = lookup_key(0, policy.key == LookupKey::CapabilityDerived);
-    let mut nodes = build_nodes(scenario, first_key);
+    let mut policy = candidate.policy();
+    if candidate == DiscoveryCandidate::SeparatedMultiStage {
+        policy.lookup_paths = tuning.separated_lookup_paths;
+    }
+    let first_key = lookup_key(0, policy.key == LookupKey::CapabilityDerived, tuning.seed);
+    let mut nodes = build_nodes(scenario, first_key, tuning.seed);
     build_routing_tables(&mut nodes);
+    contaminate_routing_tables(
+        &mut nodes,
+        tuning.routing_contamination_percent,
+        tuning.seed,
+    );
     let routing_entries = nodes.iter().map(|node| node.routing.len()).sum();
     let mut metrics = empty_metrics(scenario, nodes.len(), routing_entries);
 
     for content in 0..scenario.contents {
-        let target = lookup_key(content, policy.key == LookupKey::CapabilityDerived);
+        let target = lookup_key(
+            content,
+            policy.key == LookupKey::CapabilityDerived,
+            tuning.seed,
+        );
         let replicas = select_replicas(
             &nodes,
             target,
             policy.routing == RoutingPolicy::PrefixDiverse,
+            tuning.replica_count,
         );
         metrics.stored_records += replicas.len();
         metrics.sybil_records += replicas.iter().filter(|&&index| nodes[index].sybil).count();
-        let provider = select_node(&nodes, stable_hash(b"provider", content as u64), true);
+        let provider = select_node(
+            &nodes,
+            stable_hash(b"provider", content as u64 ^ tuning.seed),
+            true,
+        );
         let provider_observers = provider_observers(&nodes, policy, provider, target, &replicas);
         metrics.provider_key_observers += provider_observers.len();
 
-        let requester = select_node(&nodes, stable_hash(b"requester", content as u64), true);
+        let requester = select_node(
+            &nodes,
+            stable_hash(b"requester", content as u64 ^ tuning.seed),
+            true,
+        );
         let mut malicious_repeat_counts: HashMap<usize, usize> = HashMap::new();
         let mut malicious_requester_repeat_counts: HashMap<usize, usize> = HashMap::new();
 
         for repetition in 0..scenario.lookups_per_content {
-            let combined = combined_lookup(
-                &nodes, policy, requester, target, &replicas, content, repetition,
-            );
+            let combined = combined_lookup(LookupInputs {
+                nodes: &nodes,
+                policy,
+                requester,
+                target,
+                replicas: &replicas,
+                content,
+                repetition,
+                seed: tuning.seed,
+            });
 
             if combined.success {
                 metrics.successes += 1;
@@ -313,6 +385,9 @@ pub fn simulate(scenario: ResearchScenario, candidate: DiscoveryCandidate) -> Re
                 .copied()
                 .filter(|&index| nodes[index].malicious)
                 .collect();
+            if !combined.success && !malicious_observers.is_empty() {
+                metrics.eclipsed_lookups += 1;
+            }
             for index in &malicious_observers {
                 *malicious_repeat_counts.entry(*index).or_default() += 1;
                 if policy.origin == LookupOrigin::Direct {
@@ -376,40 +451,47 @@ fn provider_observers(
     publication.queried.union(replicas).copied().collect()
 }
 
-fn combined_lookup(
-    nodes: &[Node],
+#[derive(Clone, Copy)]
+struct LookupInputs<'a> {
+    nodes: &'a [Node],
     policy: Policy,
     requester: usize,
     target: u64,
-    replicas: &BTreeSet<usize>,
+    replicas: &'a BTreeSet<usize>,
     content: usize,
     repetition: usize,
-) -> LookupTrace {
+    seed: u64,
+}
+
+fn combined_lookup(inputs: LookupInputs<'_>) -> LookupTrace {
     let mut combined = LookupTrace::default();
-    for path in 0..policy.lookup_paths {
-        let start = if policy.origin == LookupOrigin::Oblivious {
+    for path in 0..inputs.policy.lookup_paths {
+        let start = if inputs.policy.origin == LookupOrigin::Oblivious {
             select_node(
-                nodes,
-                stable_hash(b"gateway", combine_seed(content, repetition, path)),
+                inputs.nodes,
+                stable_hash(
+                    b"gateway",
+                    combine_seed(inputs.content, inputs.repetition, path) ^ inputs.seed,
+                ),
                 false,
             )
         } else {
-            requester
+            inputs.requester
         };
         let trace = route_lookup(
-            nodes,
+            inputs.nodes,
             start,
-            target,
-            replicas,
-            policy.routing == RoutingPolicy::PrefixDiverse,
+            inputs.target,
+            inputs.replicas,
+            inputs.policy.routing == RoutingPolicy::PrefixDiverse,
         );
         combined.success |= trace.success;
         combined.rounds = combined.rounds.max(trace.rounds);
         combined.observers.extend(trace.observers);
         combined.queried.extend(trace.queried);
     }
-    if policy.origin == LookupOrigin::Direct {
-        combined.observers.remove(&requester);
+    if inputs.policy.origin == LookupOrigin::Direct {
+        combined.observers.remove(&inputs.requester);
     }
     combined
 }
@@ -429,6 +511,7 @@ fn empty_metrics(
         provider_key_observers: 0,
         adversary_both_sides: 0,
         colluding_adversary_both_sides: 0,
+        eclipsed_lookups: 0,
         repeated_key_linkability: 0,
         repeated_requester_linkability: 0,
         control_messages: 0,
@@ -444,17 +527,18 @@ fn empty_metrics(
 #[must_use]
 pub fn render_markdown(results: &[ResearchResult]) -> String {
     let mut output = String::from(
-        "| Scenario | Candidate | Success | Rounds | Key observers | Raw-ID observers | Requester+key | Provider+key | Same node both | Colluding both | Messages |\n\
-         |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "| Scenario | Candidate | Success | Modeled eclipse | Rounds | Key observers | Raw-ID observers | Requester+key | Provider+key | Same node both | Colluding both | Messages |\n\
+         |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
     for result in results {
         let metrics = &result.metrics;
         writeln!(
             output,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             result.scenario.name,
             result.candidate.label(),
             ratio(metrics.successes, metrics.lookups),
+            ratio(metrics.eclipsed_lookups, metrics.lookups),
             average(metrics.routing_rounds, metrics.lookups),
             average(metrics.lookup_key_observers, metrics.lookups),
             average(metrics.raw_content_observers, metrics.lookups),
@@ -489,7 +573,7 @@ pub fn render_markdown(results: &[ResearchResult]) -> String {
     output
 }
 
-fn build_nodes(scenario: ResearchScenario, sybil_target: u64) -> Vec<Node> {
+fn build_nodes(scenario: ResearchScenario, sybil_target: u64, seed: u64) -> Vec<Node> {
     let malicious_count = scenario
         .ordinary_nodes
         .saturating_mul(usize::from(scenario.malicious_percent))
@@ -498,11 +582,11 @@ fn build_nodes(scenario: ResearchScenario, sybil_target: u64) -> Vec<Node> {
         .ordinary_nodes
         .saturating_mul(usize::from(scenario.failed_percent))
         / 100;
-    let malicious = ranked_indices(scenario.ordinary_nodes, malicious_count, b"malicious");
-    let failed = ranked_indices(scenario.ordinary_nodes, failed_count, b"failed");
+    let malicious = ranked_indices(scenario.ordinary_nodes, malicious_count, b"malicious", seed);
+    let failed = ranked_indices(scenario.ordinary_nodes, failed_count, b"failed", seed);
     let mut nodes: Vec<_> = (0..scenario.ordinary_nodes)
         .map(|index| Node {
-            id: stable_hash(b"node", index as u64),
+            id: stable_hash(b"node", index as u64 ^ seed),
             group: u16::try_from(index % 256).expect("group is bounded"),
             malicious: malicious.contains(&index),
             failed: failed.contains(&index),
@@ -521,9 +605,9 @@ fn build_nodes(scenario: ResearchScenario, sybil_target: u64) -> Vec<Node> {
     nodes
 }
 
-fn ranked_indices(total: usize, count: usize, domain: &[u8]) -> HashSet<usize> {
+fn ranked_indices(total: usize, count: usize, domain: &[u8], seed: u64) -> HashSet<usize> {
     let mut ranked: Vec<_> = (0..total)
-        .map(|index| (stable_hash(domain, index as u64), index))
+        .map(|index| (stable_hash(domain, index as u64 ^ seed), index))
         .collect();
     ranked.sort_unstable();
     ranked
@@ -553,14 +637,49 @@ fn build_routing_tables(nodes: &mut [Node]) {
     }
 }
 
-fn select_replicas(nodes: &[Node], target: u64, diverse: bool) -> BTreeSet<usize> {
+fn contaminate_routing_tables(nodes: &mut [Node], percent: u8, seed: u64) {
+    if percent == 0 {
+        return;
+    }
+    let malicious: Vec<_> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| node.malicious.then_some(index))
+        .collect();
+    if malicious.is_empty() {
+        return;
+    }
+    for (node_index, node) in nodes.iter_mut().enumerate() {
+        let replacements = node.routing.len().saturating_mul(usize::from(percent)) / 100;
+        for slot in 0..replacements {
+            let choice_seed = stable_hash(
+                b"routing-contamination",
+                (node_index as u64).rotate_left(17) ^ slot as u64 ^ seed,
+            );
+            let attacker = malicious[usize::try_from(choice_seed % malicious.len() as u64)
+                .expect("attacker index is bounded")];
+            if attacker != node_index {
+                node.routing[slot] = attacker;
+            }
+        }
+        node.routing.sort_unstable();
+        node.routing.dedup();
+    }
+}
+
+fn select_replicas(
+    nodes: &[Node],
+    target: u64,
+    diverse: bool,
+    replica_count: usize,
+) -> BTreeSet<usize> {
     let mut ordered: Vec<_> = (0..nodes.len()).collect();
     ordered.sort_unstable_by_key(|&index| nodes[index].id ^ target);
     let mut groups = HashSet::new();
     ordered
         .into_iter()
         .filter(|&index| !diverse || groups.insert(nodes[index].group))
-        .take(K_BUCKET_SIZE)
+        .take(replica_count)
         .collect()
 }
 
@@ -648,8 +767,8 @@ fn select_node(nodes: &[Node], seed: u64, require_honest: bool) -> usize {
         .expect("scenario contains a usable node")
 }
 
-fn lookup_key(content: usize, blinded: bool) -> u64 {
-    let raw = stable_hash(b"content", content as u64);
+fn lookup_key(content: usize, blinded: bool, seed: u64) -> u64 {
+    let raw = stable_hash(b"content", content as u64 ^ seed);
     if blinded {
         stable_hash(b"capability-key", raw)
     } else {
@@ -681,6 +800,160 @@ fn ratio(part: usize, total: usize) -> String {
 fn average(total: usize, count: usize) -> String {
     let tenths = total.saturating_mul(10) / count.max(1);
     format!("{}.{:01}", tenths / 10, tenths % 10)
+}
+
+/// Distribution summary for the bounded seeded M8 Monte Carlo experiment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MonteCarloSummary {
+    pub candidate: DiscoveryCandidate,
+    pub trials: usize,
+    pub success_min_permille: usize,
+    pub success_median_permille: usize,
+    pub success_max_permille: usize,
+    pub eclipse_median_permille: usize,
+    pub average_rounds_tenths: usize,
+    pub average_messages_tenths: usize,
+    pub honest_replicas_tenths: usize,
+    pub malicious_replicas_tenths: usize,
+    pub requester_key_observers_tenths: usize,
+    pub provider_key_observers_tenths: usize,
+    pub same_adversary_permille: usize,
+    pub colluding_adversary_permille: usize,
+    pub repeated_key_linkability_permille: usize,
+}
+
+/// Runs twelve fixed-seed, parameter-varying trials for every M3 candidate.
+///
+/// This is a comparative model, not an Internet-scale probability estimate.
+#[must_use]
+pub fn run_m8_monte_carlo() -> Vec<MonteCarloSummary> {
+    let candidates = [
+        DiscoveryCandidate::VanillaKademlia,
+        DiscoveryCandidate::BlindedKademlia,
+        DiscoveryCandidate::DistributedRendezvous,
+        DiscoveryCandidate::SeparatedMultiStage,
+    ];
+    candidates
+        .into_iter()
+        .map(|candidate| summarize_trials(candidate, 12))
+        .collect()
+}
+
+fn summarize_trials(candidate: DiscoveryCandidate, trial_count: usize) -> MonteCarloSummary {
+    let mut success_rates = Vec::with_capacity(trial_count);
+    let mut eclipse_rates = Vec::with_capacity(trial_count);
+    let mut totals = ResearchMetrics {
+        lookups: 0,
+        successes: 0,
+        routing_rounds: 0,
+        lookup_key_observers: 0,
+        raw_content_observers: 0,
+        requester_key_observers: 0,
+        provider_key_observers: 0,
+        adversary_both_sides: 0,
+        colluding_adversary_both_sides: 0,
+        eclipsed_lookups: 0,
+        repeated_key_linkability: 0,
+        repeated_requester_linkability: 0,
+        control_messages: 0,
+        stored_records: 0,
+        sybil_records: 0,
+        routing_entries: 0,
+        nodes: 0,
+        contents: 0,
+    };
+    for trial in 0..trial_count {
+        let scenario = ResearchScenario {
+            name: "m8-seeded",
+            ordinary_nodes: [100, 180, 260][trial % 3],
+            malicious_percent: [5, 15, 30][trial % 3],
+            sybil_nodes: [0, 24, 64][trial % 3],
+            sybil_groups: [1, 4, 16][trial % 3],
+            failed_percent: [0, 10, 20][(trial / 2) % 3],
+            contents: 4,
+            lookups_per_content: [4, 8][trial % 2],
+        };
+        let tuning = ResearchTuning {
+            seed: [
+                0x1020_3040,
+                0x2233_4455,
+                0x3141_5926,
+                0x4242_4242,
+                0x5566_7788,
+                0x6172_8394,
+                0x7000_0001,
+                0x8123_4567,
+                0x90ab_cdef,
+                0xa1b2_c3d4,
+                0xbad0_cafe,
+                0xc001_d00d,
+            ][trial],
+            replica_count: [4, 8, 12][(trial / 2) % 3],
+            separated_lookup_paths: [1, 3, 5][trial % 3],
+            routing_contamination_percent: [0, 20, 50][(trial / 3) % 3],
+        };
+        let metrics = simulate_with_tuning(scenario, candidate, tuning).metrics;
+        success_rates.push(permille(metrics.successes, metrics.lookups));
+        eclipse_rates.push(permille(metrics.eclipsed_lookups, metrics.lookups));
+        accumulate_metrics(&mut totals, &metrics);
+    }
+    success_rates.sort_unstable();
+    eclipse_rates.sort_unstable();
+    MonteCarloSummary {
+        candidate,
+        trials: trial_count,
+        success_min_permille: success_rates[0],
+        success_median_permille: success_rates[trial_count / 2],
+        success_max_permille: success_rates[trial_count - 1],
+        eclipse_median_permille: eclipse_rates[trial_count / 2],
+        average_rounds_tenths: tenths(totals.routing_rounds, totals.lookups),
+        average_messages_tenths: tenths(totals.control_messages, totals.lookups),
+        honest_replicas_tenths: tenths(
+            totals.stored_records.saturating_sub(totals.sybil_records),
+            totals.contents,
+        ),
+        malicious_replicas_tenths: tenths(totals.sybil_records, totals.contents),
+        requester_key_observers_tenths: tenths(totals.requester_key_observers, totals.lookups),
+        provider_key_observers_tenths: tenths(totals.provider_key_observers, totals.contents),
+        same_adversary_permille: permille(totals.adversary_both_sides, totals.lookups),
+        colluding_adversary_permille: permille(
+            totals.colluding_adversary_both_sides,
+            totals.lookups,
+        ),
+        repeated_key_linkability_permille: permille(
+            totals.repeated_key_linkability,
+            totals.contents,
+        ),
+    }
+}
+
+fn accumulate_metrics(total: &mut ResearchMetrics, value: &ResearchMetrics) {
+    total.lookups += value.lookups;
+    total.successes += value.successes;
+    total.routing_rounds += value.routing_rounds;
+    total.lookup_key_observers += value.lookup_key_observers;
+    total.raw_content_observers += value.raw_content_observers;
+    total.requester_key_observers += value.requester_key_observers;
+    total.provider_key_observers += value.provider_key_observers;
+    total.adversary_both_sides += value.adversary_both_sides;
+    total.colluding_adversary_both_sides += value.colluding_adversary_both_sides;
+    total.eclipsed_lookups += value.eclipsed_lookups;
+    total.repeated_key_linkability += value.repeated_key_linkability;
+    total.repeated_requester_linkability += value.repeated_requester_linkability;
+    total.control_messages += value.control_messages;
+    total.stored_records += value.stored_records;
+    total.sybil_records += value.sybil_records;
+    total.routing_entries += value.routing_entries;
+    total.nodes += value.nodes;
+    total.contents += value.contents;
+}
+
+fn permille(part: usize, total: usize) -> usize {
+    part.saturating_mul(1_000) / total.max(1)
+}
+
+fn tenths(total: usize, count: usize) -> usize {
+    total.saturating_mul(10) / count.max(1)
 }
 
 #[cfg(test)]
@@ -764,5 +1037,18 @@ mod tests {
         assert_eq!(separated.successes, 99);
         assert!(separated.control_messages > vanilla.control_messages);
         assert_eq!(separated.requester_key_observers, 0);
+    }
+
+    #[test]
+    fn m8_seeded_monte_carlo_is_reproducible_and_covers_all_candidates() {
+        let first = run_m8_monte_carlo();
+        let second = run_m8_monte_carlo();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 4);
+        assert!(first.iter().all(|result| result.trials == 12));
+        assert!(first.iter().all(|result| {
+            result.success_min_permille <= result.success_median_permille
+                && result.success_median_permille <= result.success_max_permille
+        }));
     }
 }

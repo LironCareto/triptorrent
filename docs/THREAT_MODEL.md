@@ -99,3 +99,22 @@ The Network & Privacy view is descriptive, not a security indicator. It reports 
 ## Security rule
 
 No protocol component should make an anonymity claim stronger than what the threat model and implementation can support.
+
+## M8 collusion and observable metadata
+
+The table records associations available to cooperating roles in the current prototype or selected M3 research direction. “Derived key” means the capability-derived lookup key, not the raw content ID. Timing and payload size remain visible to every network role carrying the relevant traffic.
+
+| Colluding roles | Requester IP | Provider IP | Raw content ID | Derived key | Route | Requester↔content | Provider↔content | Requester↔provider |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| M2 bootstrap + transfer relay | yes | yes | yes | n/a | yes | yes | yes | yes, by route/timing |
+| two transfer relays | each local side | each local side | no | no | yes | timing/size only | timing/size only | probable correlation |
+| provider + transfer relay | requester at relay | yes | provider knows requested ID | no | yes | yes | yes | yes |
+| requester-side observer + relay | requester | provider at relay | no | no | yes | timing/size inference | timing/size inference | probable correlation |
+| M3 query relay + gateway | requester | no | no | yes at gateway | discovery path | yes for derived key | no | no |
+| M3 gateway + DHT storage node | no | descriptor-dependent | encrypted from gateway; capability holder may know it | yes | discovery path | no requester IP | derived-key/provider linkage | no |
+| M3 query relay + transfer relay | requester | provider at transfer relay | no | no | transfer route | timing/size inference | timing/size inference | probable correlation |
+| future classic adapter + TripTorrent relay | classic endpoint/requester context | provider at relay | BitTorrent identity at adapter | maybe | transfer route | yes in classic mode | timing/size inference | probable correlation |
+
+The M8 traffic model recovered content-size order in 12/12 comparisons and classified 6/6 checked transfer shapes using byte counts alone. The fixed-seed discovery model also retained 68.7-75% repeated-key linkability across candidates. These controlled model results show that encryption does not hide size, cadence or timing. They are not Internet-scale probabilities.
+
+M8 adds bounds that turn several memory/thread growth paths into bounded denial of service. It does not authenticate M2 registrations or failure reports, prevent clients from occupying relay capacity, establish Sybil identity cost, or resist a global passive observer. Detailed findings and the controlled-testnet gate are in [M8_FINDINGS.md](M8_FINDINGS.md).

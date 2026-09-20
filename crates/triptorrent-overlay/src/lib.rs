@@ -1,10 +1,12 @@
 #![doc = "Temporary M2 overlay and deterministic M3 discovery research support."]
 
 pub mod research;
+pub mod traffic_analysis;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,6 +19,31 @@ use triptorrent_protocol::{
 
 const MAX_CONTROL_FRAME: usize = 256 * 1024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CONTROL_CONNECTIONS: usize = 256;
+
+/// Explicit state limits for the temporary M2 registry.
+#[derive(Clone, Copy, Debug)]
+pub struct RegistryLimits {
+    /// Maximum simultaneously leased peers.
+    pub max_peers: usize,
+    /// Maximum simultaneously leased relays.
+    pub max_relays: usize,
+    /// Maximum content identifiers in one peer advertisement.
+    pub max_content_ids_per_peer: usize,
+    /// Maximum unconsumed route assignments for one provider.
+    pub max_assignments_per_peer: usize,
+}
+
+impl Default for RegistryLimits {
+    fn default() -> Self {
+        Self {
+            max_peers: 4_096,
+            max_relays: 256,
+            max_content_ids_per_peer: triptorrent_protocol::MAX_ADVERTISED_CONTENT_IDS,
+            max_assignments_per_peer: 64,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct PeerLease {
@@ -50,6 +77,7 @@ pub struct OverlaySnapshot {
 /// Deterministic in-memory state machine for the temporary M2 bootstrap.
 pub struct Registry {
     lease_ms: u64,
+    limits: RegistryLimits,
     peers: BTreeMap<PeerId, PeerLease>,
     relays: BTreeMap<String, RelayLease>,
     assignments: HashMap<PeerId, VecDeque<QueuedAssignment>>,
@@ -60,8 +88,15 @@ impl Registry {
     /// Creates an empty registry whose entries expire after `lease_ms`.
     #[must_use]
     pub fn new(lease_ms: u64) -> Self {
+        Self::with_limits(lease_ms, RegistryLimits::default())
+    }
+
+    /// Creates an empty registry with explicit limits for deterministic testing.
+    #[must_use]
+    pub fn with_limits(lease_ms: u64, limits: RegistryLimits) -> Self {
         Self {
             lease_ms: lease_ms.max(1),
+            limits,
             peers: BTreeMap::new(),
             relays: BTreeMap::new(),
             assignments: HashMap::new(),
@@ -92,6 +127,13 @@ impl Registry {
         if advertisement.content_ids.is_empty() {
             return Err(RegistryError::NoContent);
         }
+        if advertisement.content_ids.len() > self.limits.max_content_ids_per_peer {
+            return Err(RegistryError::TooManyContentIds);
+        }
+        let unique: HashSet<_> = advertisement.content_ids.iter().copied().collect();
+        if unique.len() != advertisement.content_ids.len() {
+            return Err(RegistryError::DuplicateContentId);
+        }
         if !advertisement.capabilities.iter().any(|capability| {
             matches!(
                 capability,
@@ -101,6 +143,11 @@ impl Registry {
             return Err(RegistryError::UnsupportedPeer);
         }
         self.purge(now_ms);
+        if !self.peers.contains_key(&advertisement.peer_id)
+            && self.peers.len() >= self.limits.max_peers
+        {
+            return Err(RegistryError::PeerLimitReached);
+        }
         self.peers.insert(
             advertisement.peer_id,
             PeerLease {
@@ -138,6 +185,11 @@ impl Registry {
             .parse::<SocketAddr>()
             .map_err(|_| RegistryError::InvalidRelayAddress)?;
         self.purge(now_ms);
+        if !self.relays.contains_key(&advertisement.relay_id)
+            && self.relays.len() >= self.limits.max_relays
+        {
+            return Err(RegistryError::RelayLimitReached);
+        }
         self.relays.insert(
             advertisement.relay_id.clone(),
             RelayLease {
@@ -170,7 +222,7 @@ impl Registry {
             .advertisement
             .clone();
         let relay = self.relays.values().next()?.advertisement.clone();
-        Some(self.queue_assignment(now_ms, &provider, &relay, "m2"))
+        self.queue_assignment(now_ms, &provider, &relay, "m2")
     }
 
     /// Creates independent relay routes for several distinct live providers.
@@ -207,7 +259,7 @@ impl Registry {
         providers
             .into_iter()
             .enumerate()
-            .map(|(index, provider)| {
+            .filter_map(|(index, provider)| {
                 let relay = &relays[index % relays.len()];
                 self.queue_assignment(now_ms, &provider, relay, "m4")
             })
@@ -220,7 +272,11 @@ impl Registry {
         provider: &PeerAdvertisement,
         relay: &RelayAdvertisement,
         prefix: &str,
-    ) -> RouteAssignment {
+    ) -> Option<RouteAssignment> {
+        let queue = self.assignments.entry(provider.peer_id).or_default();
+        if queue.len() >= self.limits.max_assignments_per_peer {
+            return None;
+        }
         self.next_route = self.next_route.wrapping_add(1);
         let assignment = RouteAssignment {
             provider_id: provider.peer_id,
@@ -229,14 +285,11 @@ impl Registry {
             relay_address: relay.address.clone(),
             route: format!("{prefix}-{:016x}", self.next_route),
         };
-        self.assignments
-            .entry(assignment.provider_id)
-            .or_default()
-            .push_back(QueuedAssignment {
-                assignment: assignment.clone(),
-                expires_at: now_ms.saturating_add(self.lease_ms),
-            });
-        assignment
+        queue.push_back(QueuedAssignment {
+            assignment: assignment.clone(),
+            expires_at: now_ms.saturating_add(self.lease_ms),
+        });
+        Some(assignment)
     }
 
     /// Renews a provider and returns its next still-valid route assignment.
@@ -312,6 +365,18 @@ pub enum RegistryError {
     /// Relay endpoints must be concrete socket addresses in M2.
     #[error("relay address must be a valid IP socket address")]
     InvalidRelayAddress,
+    /// A peer advertised more content identifiers than the bounded registry accepts.
+    #[error("peer advertisement exceeds content-ID limit")]
+    TooManyContentIds,
+    /// Repeating an identifier in one advertisement wastes bounded state.
+    #[error("peer advertisement contains duplicate content IDs")]
+    DuplicateContentId,
+    /// The temporary registry reached its explicit peer bound.
+    #[error("peer registry limit reached")]
+    PeerLimitReached,
+    /// The temporary registry reached its explicit relay bound.
+    #[error("relay registry limit reached")]
+    RelayLimitReached,
 }
 
 fn validate_relay_id(relay_id: &str) -> Result<(), RegistryError> {
@@ -461,12 +526,19 @@ fn expect_registered(response: OverlayResponse) -> Result<u64, OverlayError> {
 /// Returns an I/O error if accepting a connection fails.
 pub fn serve(listener: &TcpListener, lease_ms: u64) -> io::Result<()> {
     let registry = Arc::new(Mutex::new(Registry::new(lease_ms)));
+    let active = Arc::new(AtomicUsize::new(0));
     let epoch = Instant::now();
     for incoming in listener.incoming() {
         let stream = incoming?;
+        if active.load(Ordering::Relaxed) >= MAX_CONTROL_CONNECTIONS {
+            continue;
+        }
+        active.fetch_add(1, Ordering::Relaxed);
         let registry = Arc::clone(&registry);
+        let active = Arc::clone(&active);
         thread::spawn(move || {
             let _ = handle_connection(stream, &registry, elapsed_ms(epoch));
+            active.fetch_sub(1, Ordering::Relaxed);
         });
     }
     Ok(())
@@ -798,6 +870,88 @@ mod tests {
         assert_eq!(
             registry.discover(1, content_id).unwrap().relay_id,
             "relay-b"
+        );
+    }
+
+    #[test]
+    fn hostile_registration_and_route_storms_are_bounded() {
+        let limits = RegistryLimits {
+            max_peers: 1,
+            max_relays: 1,
+            max_content_ids_per_peer: 2,
+            max_assignments_per_peer: 1,
+        };
+        let content = ContentId::digest(b"bounded");
+        let extra = ContentId::digest(b"extra");
+        let mut registry = Registry::with_limits(1_000, limits);
+
+        let mut spoofed = peer(1, vec![content]);
+        spoofed.peer_id = peer(2, vec![content]).peer_id;
+        assert!(matches!(
+            registry.register_peer(0, spoofed),
+            Err(RegistryError::PeerIdentityMismatch)
+        ));
+        assert!(matches!(
+            registry.register_peer(0, peer(1, Vec::new())),
+            Err(RegistryError::NoContent)
+        ));
+        let mut unsupported = peer(1, vec![content]);
+        unsupported.capabilities.clear();
+        assert!(matches!(
+            registry.register_peer(0, unsupported),
+            Err(RegistryError::UnsupportedPeer)
+        ));
+        assert!(matches!(
+            registry.register_relay(0, relay("../relay", 7000)),
+            Err(RegistryError::InvalidRelayId)
+        ));
+
+        let duplicate = peer(1, vec![content, content]);
+        assert!(matches!(
+            registry.register_peer(0, duplicate),
+            Err(RegistryError::DuplicateContentId)
+        ));
+        let excessive = peer(1, vec![content, extra, ContentId::digest(b"third")]);
+        assert!(matches!(
+            registry.register_peer(0, excessive),
+            Err(RegistryError::TooManyContentIds)
+        ));
+
+        let provider = peer(1, vec![content]);
+        registry.register_peer(0, provider.clone()).unwrap();
+        assert!(matches!(
+            registry.register_peer(0, peer(2, vec![extra])),
+            Err(RegistryError::PeerLimitReached)
+        ));
+        registry.register_relay(0, relay("relay-a", 7000)).unwrap();
+        assert!(matches!(
+            registry.register_relay(0, relay("relay-b", 7001)),
+            Err(RegistryError::RelayLimitReached)
+        ));
+
+        assert!(registry.discover(0, content).is_some());
+        assert!(registry.discover(0, content).is_none());
+        assert!(registry.poll_peer(0, provider.peer_id).is_some());
+        assert!(registry.discover(0, content).is_some());
+    }
+
+    #[test]
+    fn malformed_control_connection_does_not_stop_bootstrap() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || serve(&listener, 1_000));
+
+        let mut malformed = TcpStream::connect(address).unwrap();
+        malformed
+            .write_all(&u32::try_from(MAX_CONTROL_FRAME + 1).unwrap().to_be_bytes())
+            .unwrap();
+        drop(malformed);
+
+        assert_eq!(
+            BootstrapClient::new(address)
+                .register_relay(relay("relay-after-malformed", 7000))
+                .unwrap(),
+            1_000
         );
     }
 

@@ -293,4 +293,35 @@ mod tests {
             Duration::ZERO
         );
     }
+
+    #[test]
+    fn replayed_or_wrong_provider_chunk_cannot_change_verified_state() {
+        let availability = vec![PieceAvailability::all(1), PieceAvailability::all(1)];
+        let mut scheduler = Scheduler::new(1, availability, &[false]).unwrap();
+        assert_eq!(scheduler.assign(0), Some(0));
+        assert_eq!(scheduler.accept(1, 0), Err(ScheduleError::UnexpectedChunk));
+        assert!(!scheduler.is_complete());
+        scheduler.accept(0, 0).unwrap();
+        assert!(scheduler.is_complete());
+        assert_eq!(scheduler.accept(0, 0), Err(ScheduleError::UnexpectedChunk));
+        assert!(scheduler.is_complete());
+    }
+
+    #[test]
+    fn hostile_provider_retries_are_bounded_by_provider_count() {
+        let availability = vec![PieceAvailability::all(1); 4];
+        let mut scheduler = Scheduler::new(1, availability, &[false]).unwrap();
+        for provider in 0..4 {
+            assert_eq!(scheduler.assign(provider), Some(0));
+            scheduler.reject(provider);
+            assert!(
+                scheduler
+                    .provider_stats(provider)
+                    .is_some_and(|state| !state.active)
+            );
+        }
+        assert_eq!(scheduler.retries(), 4);
+        assert!(!scheduler.can_finish());
+        assert_eq!(scheduler.assign(0), None);
+    }
 }

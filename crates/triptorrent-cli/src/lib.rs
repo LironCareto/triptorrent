@@ -24,6 +24,7 @@ const FETCH_MAX_DISCOVERY_ATTEMPTS: usize = 600;
 const MAX_SWARM_PROVIDERS: u16 = 8;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(10);
 const RESUME_VERSION: u16 = 0;
+const MAX_RESUME_STATE_BYTES: u64 = 40 * 1024 * 1024;
 const TEST_POLL_INTERVAL_ENV: &str = "TRIPTORRENT_TEST_OVERLAY_POLL_MS";
 const TEST_IDLE_MARKER_ENV: &str = "TRIPTORRENT_TEST_IDLE_MARKER_AFTER";
 const TEST_CORRUPT_CHUNKS_ENV: &str = "TRIPTORRENT_TEST_CORRUPT_CHUNKS";
@@ -914,6 +915,9 @@ struct ResumeDownload {
 
 impl ResumeDownload {
     fn open(output: &Path, manifest: &Manifest) -> Result<(Self, File, usize)> {
+        manifest
+            .validate_shape()
+            .context("refusing malformed transfer manifest")?;
         let part_path = append_suffix(output, ".triptorrent-part");
         let state_path = append_suffix(output, ".triptorrent-state");
         let state_exists = state_path.exists();
@@ -923,6 +927,9 @@ impl ResumeDownload {
         }
 
         if state_exists {
+            if fs::metadata(&state_path)?.len() > MAX_RESUME_STATE_BYTES {
+                bail!("resume state exceeds 40 MiB limit");
+            }
             let encoded = fs::read(&state_path)
                 .with_context(|| format!("failed to read resume state {}", state_path.display()))?;
             let record: ResumeRecord = postcard::from_bytes(&encoded)
@@ -1010,11 +1017,19 @@ impl ResumeDownload {
     fn finish(self, mut partial: File, output: &Path, content_id: ContentId) -> Result<()> {
         partial.flush()?;
         partial.seek(SeekFrom::Start(0))?;
-        let mut bytes =
-            Vec::with_capacity(usize::try_from(self.record.manifest.length).unwrap_or(0));
-        partial.read_to_end(&mut bytes)?;
-        if u64::try_from(bytes.len()).ok() != Some(self.record.manifest.length)
-            || ContentId::digest(&bytes) != content_id
+        let mut hasher = blake3::Hasher::new();
+        let mut total = 0_u64;
+        let mut buffer = vec![0_u8; CHUNK_SIZE];
+        loop {
+            let read = partial.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        }
+        if total != self.record.manifest.length
+            || hasher.finalize().as_bytes() != content_id.as_bytes()
         {
             bail!("completed partial file failed content-ID verification");
         }
@@ -1076,8 +1091,14 @@ fn expected_chunk_length(manifest: &Manifest, index: u32) -> Result<u64> {
     {
         bail!("chunk index {index} is outside the manifest");
     }
-    let offset = u64::from(index).saturating_mul(u64::from(manifest.chunk_size));
-    Ok((manifest.length - offset).min(u64::from(manifest.chunk_size)))
+    let offset = u64::from(index)
+        .checked_mul(u64::from(manifest.chunk_size))
+        .context("chunk offset overflow")?;
+    let remaining = manifest
+        .length
+        .checked_sub(offset)
+        .context("chunk offset exceeds manifest length")?;
+    Ok(remaining.min(u64::from(manifest.chunk_size)))
 }
 
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -1252,5 +1273,47 @@ mod tests {
         drop(partial);
         drop(resume);
         assert!(ResumeDownload::open(&output, &second).is_err());
+    }
+
+    #[test]
+    fn resume_rejects_impossible_bitmap_and_partial_lengths() {
+        let directory = tempdir().unwrap();
+        let output = directory.path().join("output.bin");
+        let manifest = Manifest::from_bytes(&vec![9; CHUNK_SIZE + 1]).unwrap().0;
+        let (resume, partial, _) = ResumeDownload::open(&output, &manifest).unwrap();
+        let state_path = resume.state_path.clone();
+        let part_path = resume.part_path.clone();
+        drop(partial);
+        drop(resume);
+
+        let hostile = ResumeRecord {
+            version: RESUME_VERSION,
+            manifest: manifest.clone(),
+            completed: vec![true; manifest.chunks.len() + 1],
+        };
+        fs::write(&state_path, postcard::to_allocvec(&hostile).unwrap()).unwrap();
+        assert!(ResumeDownload::open(&output, &manifest).is_err());
+
+        let valid = ResumeRecord {
+            version: RESUME_VERSION,
+            manifest: manifest.clone(),
+            completed: vec![false; manifest.chunks.len()],
+        };
+        fs::write(&state_path, postcard::to_allocvec(&valid).unwrap()).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&part_path)
+            .unwrap()
+            .set_len(manifest.length - 1)
+            .unwrap();
+        assert!(ResumeDownload::open(&output, &manifest).is_err());
+
+        OpenOptions::new()
+            .write(true)
+            .open(&part_path)
+            .unwrap()
+            .set_len(manifest.length + 1)
+            .unwrap();
+        assert!(ResumeDownload::open(&output, &manifest).is_err());
     }
 }

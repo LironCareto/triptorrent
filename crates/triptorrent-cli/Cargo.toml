@@ -8,6 +8,7 @@ description = "Local command-line demo for the TripTorrent M1 prototype"
 
 [dependencies]
 anyhow.workspace = true
+blake3.workspace = true
 clap.workspace = true
 hex.workspace = true
 postcard.workspace = true
