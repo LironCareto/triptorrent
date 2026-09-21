@@ -652,7 +652,7 @@ fn desktop_fetch_progress_pause_resume_and_restart() {
     assert!(!content_dir.join("data.triptorrent-state").exists());
     assert_eq!(
         completed.network_privacy.discovery,
-        "temporary_centralized_m2_bootstrap"
+        "centralized_m2_derived_testnet_bootstrap"
     );
     assert_eq!(
         completed.network_privacy.data_path,

@@ -1520,6 +1520,10 @@ fn route_request_inner(runtime: &Arc<NodeRuntime>, request: &HttpRequest) -> Res
                 "known_relays": Value::Null,
                 "api_version": "v1",
                 "node_version": env!("CARGO_PKG_VERSION"),
+                "wire_protocol_version": triptorrent_core::PROTOCOL_VERSION,
+                "network": triptorrent_core::NETWORK_ID,
+                "discovery_profile": triptorrent_core::DISCOVERY_PROFILE,
+                "active_transfer_protocol": "relayed-swarm-v1",
             }),
         )),
         ("GET", "/v1/network-privacy") => Ok((

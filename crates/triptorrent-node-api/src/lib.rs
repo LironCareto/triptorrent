@@ -164,6 +164,10 @@ pub struct Diagnostics {
     pub known_relays: Option<usize>,
     pub api_version: String,
     pub node_version: String,
+    pub wire_protocol_version: u16,
+    pub network: String,
+    pub discovery_profile: String,
+    pub active_transfer_protocol: String,
 }
 
 /// Structured statement of the currently implemented network path.
@@ -191,8 +195,8 @@ impl NetworkPrivacyStatus {
     #[must_use]
     pub fn current_prototype() -> Self {
         Self {
-            network_mode: "triptorrent_prototype".into(),
-            discovery: "temporary_centralized_m2_bootstrap".into(),
+            network_mode: "triptorrent_public_testnet_1".into(),
+            discovery: "centralized_m2_derived_testnet_bootstrap".into(),
             data_path: "end_to_end_encrypted_relayed_swarm".into(),
             direct_peer_connection: false,
             relay_visibility: vec![

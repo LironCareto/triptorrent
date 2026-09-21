@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
+use std::{env, fs};
 use triptorrent_cli::{
     FetchMonitor, FetchOptions, ShareOptions, VerifiedTransferProgress, fetch_file,
     fetch_file_via_overlay_with_monitor, fetch_file_via_overlay_with_options, identify, parse_psk,
@@ -23,7 +24,7 @@ use triptorrent_protocol::RelayAdvertisement;
 #[derive(Debug, Parser)]
 #[command(
     name = "triptorrent",
-    about = "Experimental local TripTorrent M1/M2 demo"
+    about = "TripTorrent Testnet v1 reference client and services"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -32,7 +33,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the temporary M2 bootstrap and rendezvous service.
+    /// Run the centralized Testnet v1 bootstrap and rendezvous service.
     Bootstrap {
         /// Address on which the bootstrap accepts control connections.
         #[arg(long, default_value = "127.0.0.1:7100")]
@@ -46,10 +47,10 @@ enum Command {
         /// Address on which the relay accepts peer connections.
         #[arg(long, default_value = "127.0.0.1:7000")]
         listen: SocketAddr,
-        /// M2 bootstrap address. Omit it to retain manual M1 behavior.
+        /// Testnet v1 bootstrap address. Omit it to retain manual M1 behavior.
         #[arg(long)]
         bootstrap: Option<SocketAddr>,
-        /// Ephemeral M2 relay identifier.
+        /// Ephemeral Testnet v1 relay identifier.
         #[arg(long)]
         id: Option<String>,
         /// Reachable relay address to advertise; defaults to the listen address.
@@ -63,7 +64,7 @@ enum Command {
     },
     /// Share one file through an existing relay route.
     Share {
-        /// M2 bootstrap address for automatic discovery and routing.
+        /// Testnet v1 bootstrap address for automatic discovery and routing.
         #[arg(long)]
         bootstrap: Option<SocketAddr>,
         /// Manual M1 relay address.
@@ -84,7 +85,7 @@ enum Command {
     },
     /// Fetch one content ID through an existing relay route.
     Fetch {
-        /// M2 bootstrap address for automatic discovery and routing.
+        /// Testnet v1 bootstrap address for automatic discovery and routing.
         #[arg(long)]
         bootstrap: Option<SocketAddr>,
         /// Manual M1 relay address.
@@ -116,6 +117,37 @@ enum Command {
     Transfer {
         #[command(subcommand)]
         command: TransferCommand,
+    },
+    /// Inspect or probe the explicitly experimental public-testnet profile.
+    Testnet {
+        #[command(subcommand)]
+        command: TestnetCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TestnetCommand {
+    /// Print software, wire, network, discovery, and transfer identifiers.
+    Status,
+    /// Check bootstrap negotiation and optionally relay TCP reachability.
+    Health {
+        #[arg(long)]
+        bootstrap: SocketAddr,
+        #[arg(long)]
+        relay: Option<SocketAddr>,
+    },
+    /// Perform a verified canonical transfer through bootstrap and relay infrastructure.
+    Probe {
+        #[arg(long)]
+        bootstrap: SocketAddr,
+        #[arg(
+            long,
+            default_value = "fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e199"
+        )]
+        content: triptorrent_core::ContentId,
+        /// Preserve the verified artifact at this path; otherwise use and remove a temporary file.
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -241,7 +273,7 @@ fn run(command: Command) -> Result<()> {
         Command::Bootstrap { listen, lease_ms } => {
             let listener = TcpListener::bind(listen)
                 .with_context(|| format!("failed to bind bootstrap at {listen}"))?;
-            println!("temporary M2 bootstrap listening on {listen}; lease={lease_ms}ms");
+            println!("TripTorrent Testnet v1 bootstrap listening on {listen}; lease={lease_ms}ms");
             triptorrent_overlay::serve(&listener, lease_ms).context("bootstrap stopped")?;
         }
         Command::Relay {
@@ -280,6 +312,69 @@ fn run(command: Command) -> Result<()> {
         Command::Node { command } => run_node(command)?,
         Command::Content { command } => run_content(command)?,
         Command::Transfer { command } => run_transfer(command)?,
+        Command::Testnet { command } => run_testnet(command)?,
+    }
+    Ok(())
+}
+
+fn run_testnet(command: TestnetCommand) -> Result<()> {
+    match command {
+        TestnetCommand::Status => print_json(&json!({
+            "software_version": env!("CARGO_PKG_VERSION"),
+            "wire_protocol_version": triptorrent_core::PROTOCOL_VERSION,
+            "network": triptorrent_core::NETWORK_ID,
+            "discovery_profile": triptorrent_core::DISCOVERY_PROFILE,
+            "transfer_protocol": "relayed-swarm-v1",
+            "public_endpoints_configured": false,
+        }))?,
+        TestnetCommand::Health { bootstrap, relay } => {
+            BootstrapClient::new(bootstrap).health()?;
+            if let Some(relay) = relay {
+                TcpStream::connect_timeout(&relay, Duration::from_secs(3))
+                    .with_context(|| format!("relay {relay} is unreachable"))?;
+            }
+            print_json(&json!({
+                "status": "pass",
+                "network": triptorrent_core::NETWORK_ID,
+                "wire_protocol_version": triptorrent_core::PROTOCOL_VERSION,
+                "bootstrap": bootstrap,
+                "relay": relay,
+            }))?;
+        }
+        TestnetCommand::Probe {
+            bootstrap,
+            content,
+            output,
+        } => {
+            let temporary = output.is_none();
+            let output = output.unwrap_or_else(|| {
+                env::temp_dir().join(format!("triptorrent-probe-{}.bin", std::process::id()))
+            });
+            fetch_file_via_overlay_with_options(
+                bootstrap,
+                content,
+                &output,
+                FetchOptions::default(),
+            )?;
+            let bytes = fs::metadata(&output)?.len();
+            print_json(&json!({
+                "status": "pass",
+                "software_version": env!("CARGO_PKG_VERSION"),
+                "wire_protocol_version": triptorrent_core::PROTOCOL_VERSION,
+                "network": triptorrent_core::NETWORK_ID,
+                "discovery_profile": triptorrent_core::DISCOVERY_PROFILE,
+                "transfer_protocol": "relayed-swarm-v1",
+                "bootstrap": bootstrap,
+                "content_id": content,
+                "verified_bytes": bytes,
+                "direct_provider_connection": false,
+            }))?;
+            if temporary {
+                fs::remove_file(&output).with_context(|| {
+                    format!("failed to remove probe output {}", output.display())
+                })?;
+            }
+        }
     }
     Ok(())
 }

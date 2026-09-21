@@ -1,5 +1,7 @@
 # RFC 0001: Experimental M2 bootstrap overlay
 
+> Historical: RFC 0005 and `spec/testnet-v1.md` supersede this wire encoding for Testnet v1.
+
 - Status: draft
 - Authors: TripTorrent contributors
 - Created: 2026-09-19

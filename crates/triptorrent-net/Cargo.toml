@@ -10,6 +10,7 @@ description = "Transport abstraction and encrypted sessions for TripTorrent"
 snow.workspace = true
 thiserror.workspace = true
 triptorrent-protocol = { path = "../triptorrent-protocol" }
+triptorrent-core = { path = "../triptorrent-core" }
 
 [lints]
 workspace = true

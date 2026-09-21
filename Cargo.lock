@@ -3170,6 +3170,7 @@ version = "0.0.0"
 dependencies = [
  "snow",
  "thiserror 2.0.20",
+ "triptorrent-core",
  "triptorrent-protocol",
 ]
 
@@ -3217,10 +3218,10 @@ name = "triptorrent-protocol"
 version = "0.0.0"
 dependencies = [
  "hex",
- "postcard",
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "triptorrent-core",
 ]
@@ -3228,6 +3229,9 @@ dependencies = [
 [[package]]
 name = "triptorrent-relay"
 version = "0.0.0"
+dependencies = [
+ "triptorrent-core",
+]
 
 [[package]]
 name = "triptorrent-swarm"

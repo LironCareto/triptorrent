@@ -95,7 +95,16 @@ M7 keeps the GUI, typed API client and daemon/runtime as separate crates. It rep
 
 M8 fixed concrete fail-closed and resource-bound defects without redesigning the selected protocol. It recommends proceeding only to a controlled, clearly labelled M9 testnet. M2 spoofing, Sybil/eclipse exposure, metadata correlation and the limits of synthetic research remain explicit risks; no security or anonymity guarantee is made.
 
-## M9 — Public testnet
-- versioned wire protocol
-- independent implementation test
-- public conformance suite
+## M9 — Public testnet (implementation ready; public deployment validation pending)
+- [x] explicit Testnet v1 wire protocol and network identity
+- [x] language-independent normative specification and no-downgrade negotiation
+- [x] public positive/negative conformance vectors consumed by Rust and Python
+- [x] real Rust-provider/Python-receiver process-level transfer
+- [x] bootstrap/relay Docker, Compose, systemd, health and operator packaging
+- [x] canonical legal artifact, probe, release workflow and audience-specific guides
+- [x] private vulnerability reporting enabled and verified through the repository API
+- [ ] reporter-facing private submission flow checked before public exposure
+- [ ] real public bootstrap and at least two public relays deployed
+- [ ] two-location external canonical transfer and failure/restart validation
+
+M9 is not complete. No endpoint is committed until it exists and passes the deployment gate in `docs/M9_TESTNET.md`. The M2-derived discovery service remains centralized testnet scaffolding; M3 private discovery is not implemented.

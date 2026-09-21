@@ -10,11 +10,13 @@ The conceptual relationship is closer to **Kademlia relative to eD2k** than to â
 
 ## Status
 
-**Pre-alpha / protocol design.**
+**Pre-alpha / controlled Testnet v1 implementation ready; public deployment pending.**
 
-There is no stable wire protocol yet and there are currently **no security or anonymity guarantees**. Do not rely on TripTorrent for privacy-sensitive use until the threat model, protocol, independent review and interoperability tests are substantially more mature.
+The implementation-independent [Testnet v1 specification](spec/testnet-v1.md) is frozen for the experimental network `triptorrent-testnet-1`. No public endpoints have yet been deployed or validated, and there are **no security or anonymity guarantees**. Do not use TripTorrent for privacy-sensitive transfers.
 
 ## Current prototype
+
+M9 preparation adds an explicit language-neutral wire profile, fail-closed version/network negotiation, checked-in [conformance vectors](test-vectors/m9-testnet-v1.json), a genuinely independent [Python receiver](interop/python/README.md), cross-language relay transfer testing, deployment packages, release workflows, and a testnet probe. The public deployment gate remains open; see the [tester](docs/M9_TESTNET.md), [operator](docs/M9_OPERATOR_GUIDE.md), and [implementer](docs/M9_IMPLEMENTER_GUIDE.md) guides.
 
 M8 completes adversarial validation across protocol, relay, bootstrap, local API, storage and offline interoperability boundaries. It adds explicit resource bounds, deterministic/property regressions, optional fuzz targets, seeded Sybil/eclipse simulations and a metadata-only traffic model. The result is **READY FOR M9** only as a controlled, clearly experimental testnet; it is not an anonymity or security claim. See the [M8 testing report](docs/M8_ADVERSARIAL_TESTING.md) and [finding log](docs/M8_FINDINGS.md).
 
@@ -85,7 +87,9 @@ Manual M1 `--relay`, `--route` and `--key` commands remain available for regress
 
 ## Testing
 
-`cargo test --workspace` is the complete milestone validation. It includes real child-process tests for the CLI, desktop controller, daemon/API lifecycle, authentication, persistent storage, restart recovery, pause/resume, verified progress, multi-source transfer, serving after restart and simultaneous upload/download. Manual UI or multi-terminal demos are optional debugging tools rather than acceptance requirements.
+`cargo test --workspace` is the complete milestone validation after installing `interop/python/requirements.txt`. It includes real child-process tests for the CLI, independent Python receiver, desktop controller, daemon/API lifecycle, authentication, persistent storage, restart recovery, pause/resume, verified progress, multi-source transfer, serving after restart and simultaneous upload/download. Manual UI or multi-terminal demos are optional debugging tools rather than acceptance requirements.
+
+Run the public conformance entry points directly with `cargo test -p triptorrent-protocol --test testnet_v1_conformance` and `python interop/python/conformance.py`.
 
 M8's seeded discovery and traffic experiments run with `cargo run -p triptorrent-overlay --example m8_monte_carlo` and `cargo run -p triptorrent-overlay --example m8_traffic_analysis`. Optional long fuzz campaigns are documented in the [M8 report](docs/M8_ADVERSARIAL_TESTING.md).
 

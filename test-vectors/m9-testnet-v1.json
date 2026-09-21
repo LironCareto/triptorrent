@@ -1,0 +1,200 @@
+{
+  "suite": "TripTorrent Testnet v1 conformance",
+  "protocol_version": 1,
+  "network": "triptorrent-testnet-1",
+  "canonical_artifact": {
+    "path": "test-data/m9-canonical.txt",
+    "size": 185,
+    "content_id": "fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e199",
+    "sha256": "8fee8c591bfdc993cf9a2f53e567a5cfe39738e6d70e60caef9b0955178d81c5",
+    "chunk_size": 32768,
+    "chunk_count": 1
+  },
+  "positive": [
+    {
+      "name": "swarm-request",
+      "surface": "application",
+      "semantic": {
+        "type": "swarm_request",
+        "content_id": "fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e199"
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d310110fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e199",
+      "expect": "accept"
+    },
+    {
+      "name": "swarm-manifest",
+      "surface": "application",
+      "semantic": {
+        "type": "swarm_manifest",
+        "length": 185,
+        "chunks": 1
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d310111fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e19900000000000000b90000800000000001fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e199000000010000000101",
+      "expect": "accept"
+    },
+    {
+      "name": "chunk-request",
+      "surface": "application",
+      "semantic": {
+        "type": "chunk_request",
+        "index": 0
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d31011200000000",
+      "expect": "accept"
+    },
+    {
+      "name": "chunk-response",
+      "surface": "application",
+      "semantic": {
+        "type": "chunk",
+        "index": 0,
+        "bytes": 185
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d31010300000000fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e199000000b954726970546f7272656e7420546573746e657420312063616e6f6e6963616c2073796e746865746963207472616e736665722061727469666163742e0a546869732066696c652069732070726f6a6563742d6f776e65642074657374206461746120616e642063617272696573206e6f2074686972642d706172747920636f6e74656e742e0a50726f746f636f6c2076657273696f6e3a20310a4e6574776f726b3a2074726970746f7272656e742d746573746e65742d310a",
+      "expect": "accept"
+    },
+    {
+      "name": "unavailable",
+      "surface": "application",
+      "semantic": {
+        "type": "chunk_unavailable",
+        "index": 0
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d31011300000000",
+      "expect": "accept"
+    },
+    {
+      "name": "completion",
+      "surface": "application",
+      "semantic": {
+        "type": "swarm_complete"
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d310114",
+      "expect": "accept"
+    },
+    {
+      "name": "structured-error",
+      "surface": "application",
+      "semantic": {
+        "type": "error",
+        "message": "test error"
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d310105000a74657374206572726f72",
+      "expect": "accept"
+    },
+    {
+      "name": "peer-registration",
+      "surface": "overlay_request",
+      "semantic": {
+        "type": "register_peer",
+        "capabilities": [
+          2
+        ],
+        "content_count": 1
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d310201ebaf85b465a09de21b398fb112c1500f2cbe658c42f379e0c0f18d24b819f63707070707070707070707070707070707070707070707070707070707070707070100020001fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e199",
+      "expect": "accept"
+    },
+    {
+      "name": "relay-advertisement",
+      "surface": "overlay_request",
+      "semantic": {
+        "type": "register_relay"
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d310204000772656c61792d61000e3132372e302e302e313a37303031",
+      "expect": "accept"
+    },
+    {
+      "name": "provider-discovery",
+      "surface": "overlay_request",
+      "semantic": {
+        "type": "discover_providers",
+        "limit": 1
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d310207fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e1990001",
+      "expect": "accept"
+    },
+    {
+      "name": "route-assignment",
+      "surface": "overlay_response",
+      "semantic": {
+        "type": "routes",
+        "count": 1
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d3103040001ebaf85b465a09de21b398fb112c1500f2cbe658c42f379e0c0f18d24b819f6370707070707070707070707070707070707070707070707070707070707070707000772656c61792d61000e3132372e302e302e313a3730303100086d392d726f757465",
+      "expect": "accept"
+    },
+    {
+      "name": "relay-registration",
+      "surface": "relay_registration",
+      "semantic": {
+        "role": "receiver",
+        "route": "m9-route"
+      },
+      "hex": "5454523100011574726970746f7272656e742d746573746e65742d310100086d392d726f757465",
+      "expect": "accept"
+    },
+    {
+      "name": "bootstrap-health",
+      "surface": "overlay_request",
+      "semantic": {
+        "type": "health",
+        "mutates_state": false
+      },
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d310209",
+      "expect": "accept"
+    }
+  ],
+  "negative": [
+    {
+      "name": "wrong-network",
+      "surface": "application",
+      "hex": "5454503100011575726970746f7272656e742d746573746e65742d310114",
+      "expect": "wrong_network"
+    },
+    {
+      "name": "unsupported-version",
+      "surface": "application",
+      "hex": "5454503100021574726970746f7272656e742d746573746e65742d310114",
+      "expect": "unsupported_version"
+    },
+    {
+      "name": "unknown-message",
+      "surface": "application",
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d3101fe",
+      "expect": "unknown_message"
+    },
+    {
+      "name": "truncated-frame",
+      "surface": "application",
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d3101",
+      "expect": "malformed"
+    },
+    {
+      "name": "trailing-data",
+      "surface": "application",
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d31011400",
+      "expect": "malformed"
+    },
+    {
+      "name": "invalid-state-order",
+      "surface": "state",
+      "sequence": [
+        "chunk_request"
+      ],
+      "expect": "invalid_state"
+    },
+    {
+      "name": "oversized-application-frame",
+      "surface": "framing",
+      "declared_length": 1048577,
+      "expect": "frame_too_large"
+    },
+    {
+      "name": "unsupported-required-capability",
+      "surface": "overlay_request",
+      "hex": "5454503100011574726970746f7272656e742d746573746e65742d310201ebaf85b465a09de21b398fb112c1500f2cbe658c42f379e0c0f18d24b819f63707070707070707070707070707070707070707070707070707070707070707070100030001fdd7d693c7ca9bb83ff74f5b900f03eb7f3fbda3ab46043f7938c4473d72e199",
+      "expect": "unsupported_capability"
+    }
+  ]
+}

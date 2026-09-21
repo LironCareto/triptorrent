@@ -7,7 +7,6 @@ repository.workspace = true
 description = "Wire-protocol primitives for the TripTorrent reference implementation"
 
 [dependencies]
-postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 triptorrent-core = { path = "../triptorrent-core" }
@@ -16,6 +15,7 @@ triptorrent-core = { path = "../triptorrent-core" }
 hex.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

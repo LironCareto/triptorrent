@@ -1,5 +1,7 @@
 # RFC 0003: Experimental M4 swarm transfer
 
+> Historical: RFC 0005 and `spec/testnet-v1.md` supersede this wire encoding and capability name for Testnet v1 while retaining the swarm semantics.
+
 - Status: draft
 - Authors: TripTorrent contributors
 - Created: 2026-09-19

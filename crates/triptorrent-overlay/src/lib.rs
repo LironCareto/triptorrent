@@ -72,6 +72,12 @@ pub struct OverlaySnapshot {
     pub relays: usize,
     /// Total content advertisements across live peers.
     pub content_advertisements: usize,
+    /// Peer leases expired since service start.
+    pub expired_peers: usize,
+    /// Relay leases expired since service start.
+    pub expired_relays: usize,
+    /// Queued assignments expired or invalidated since service start.
+    pub expired_routes: usize,
 }
 
 /// Deterministic in-memory state machine for the temporary M2 bootstrap.
@@ -82,6 +88,9 @@ pub struct Registry {
     relays: BTreeMap<String, RelayLease>,
     assignments: HashMap<PeerId, VecDeque<QueuedAssignment>>,
     next_route: u64,
+    expired_peers: usize,
+    expired_relays: usize,
+    expired_routes: usize,
 }
 
 impl Registry {
@@ -101,6 +110,9 @@ impl Registry {
             relays: BTreeMap::new(),
             assignments: HashMap::new(),
             next_route: 0,
+            expired_peers: 0,
+            expired_relays: 0,
+            expired_routes: 0,
         }
     }
 
@@ -137,7 +149,7 @@ impl Registry {
         if !advertisement.capabilities.iter().any(|capability| {
             matches!(
                 capability,
-                PeerCapability::RelayedTransferV0 | PeerCapability::SwarmTransferV0
+                PeerCapability::RelayedTransferV1 | PeerCapability::SwarmTransferV1
             )
         }) {
             return Err(RegistryError::UnsupportedPeer);
@@ -242,7 +254,7 @@ impl Registry {
                     && peer
                         .advertisement
                         .capabilities
-                        .contains(&PeerCapability::SwarmTransferV0)
+                        .contains(&PeerCapability::SwarmTransferV1)
             })
             .take(limit)
             .map(|peer| peer.advertisement.clone())
@@ -329,10 +341,16 @@ impl Registry {
                 .values()
                 .map(|peer| peer.advertisement.content_ids.len())
                 .sum(),
+            expired_peers: self.expired_peers,
+            expired_relays: self.expired_relays,
+            expired_routes: self.expired_routes,
         }
     }
 
     fn purge(&mut self, now_ms: u64) {
+        let peers_before = self.peers.len();
+        let relays_before = self.relays.len();
+        let routes_before: usize = self.assignments.values().map(VecDeque::len).sum();
         self.peers.retain(|_, peer| peer.expires_at > now_ms);
         self.relays.retain(|_, relay| relay.expires_at > now_ms);
         self.assignments.retain(|peer_id, queue| {
@@ -344,6 +362,10 @@ impl Registry {
             });
             !queue.is_empty()
         });
+        self.expired_peers += peers_before.saturating_sub(self.peers.len());
+        self.expired_relays += relays_before.saturating_sub(self.relays.len());
+        let routes_after: usize = self.assignments.values().map(VecDeque::len).sum();
+        self.expired_routes += routes_before.saturating_sub(routes_after);
     }
 }
 
@@ -500,6 +522,18 @@ impl BootstrapClient {
         }
     }
 
+    /// Verifies Testnet v1 bootstrap reachability without mutating registry state.
+    ///
+    /// # Errors
+    /// Returns an error for transport, negotiation, or unexpected responses.
+    pub fn health(&self) -> Result<(), OverlayError> {
+        match self.request(OverlayRequest::Health)? {
+            OverlayResponse::Acknowledged => Ok(()),
+            OverlayResponse::Error(message) => Err(OverlayError::Remote(message)),
+            _ => Err(OverlayError::UnexpectedResponse),
+        }
+    }
+
     fn request(&self, request: OverlayRequest) -> Result<OverlayResponse, OverlayError> {
         let mut stream = TcpStream::connect_timeout(&self.address, CONTROL_TIMEOUT)?;
         stream.set_read_timeout(Some(CONTROL_TIMEOUT))?;
@@ -531,13 +565,19 @@ pub fn serve(listener: &TcpListener, lease_ms: u64) -> io::Result<()> {
     for incoming in listener.incoming() {
         let stream = incoming?;
         if active.load(Ordering::Relaxed) >= MAX_CONTROL_CONNECTIONS {
+            eprintln!(
+                "TRIPTORRENT_BOOTSTRAP_METRIC event=connection_rejected reason=connection_limit active={}",
+                active.load(Ordering::Relaxed)
+            );
             continue;
         }
         active.fetch_add(1, Ordering::Relaxed);
         let registry = Arc::clone(&registry);
         let active = Arc::clone(&active);
         thread::spawn(move || {
-            let _ = handle_connection(stream, &registry, elapsed_ms(epoch));
+            if let Err(error) = handle_connection(stream, &registry, elapsed_ms(epoch)) {
+                eprintln!("TRIPTORRENT_BOOTSTRAP_METRIC event=request_rejected error={error}");
+            }
             active.fetch_sub(1, Ordering::Relaxed);
         });
     }
@@ -553,13 +593,38 @@ fn handle_connection(
     stream.set_write_timeout(Some(CONTROL_TIMEOUT))?;
     let frame = read_frame(&mut stream)?.ok_or(OverlayError::ConnectionClosed)?;
     let request = triptorrent_protocol::decode_overlay_request(&frame)?;
+    let event = request_name(&request);
     let response = {
         let mut registry = registry.lock().map_err(|_| OverlayError::StatePoisoned)?;
-        handle_request(&mut registry, now_ms, request)
+        let response = handle_request(&mut registry, now_ms, request);
+        let snapshot = registry.snapshot(now_ms);
+        eprintln!(
+            "TRIPTORRENT_BOOTSTRAP_METRIC event={event} peers={} relays={} advertisements={} expired_peers={} expired_relays={} expired_routes={}",
+            snapshot.peers,
+            snapshot.relays,
+            snapshot.content_advertisements,
+            snapshot.expired_peers,
+            snapshot.expired_relays,
+            snapshot.expired_routes
+        );
+        response
     };
     let encoded = triptorrent_protocol::encode_overlay_response(response)?;
     write_frame(&mut stream, &encoded)?;
     Ok(())
+}
+
+fn request_name(request: &OverlayRequest) -> &'static str {
+    match request {
+        OverlayRequest::RegisterPeer(_) => "peer_registered",
+        OverlayRequest::HeartbeatPeer { .. } => "peer_heartbeat",
+        OverlayRequest::PollPeer { .. } => "peer_poll",
+        OverlayRequest::RegisterRelay(_) => "relay_registered",
+        OverlayRequest::HeartbeatRelay { .. } => "relay_heartbeat",
+        OverlayRequest::Discover { .. } | OverlayRequest::DiscoverProviders { .. } => "discovery",
+        OverlayRequest::ReportRelayFailure { .. } => "relay_failure_reported",
+        OverlayRequest::Health => "health",
+    }
 }
 
 fn handle_request(
@@ -615,6 +680,7 @@ fn handle_request(
             registry.report_relay_failure(&relay_id);
             OverlayResponse::Acknowledged
         }
+        OverlayRequest::Health => OverlayResponse::Acknowledged,
     }
 }
 
@@ -748,7 +814,7 @@ mod tests {
         PeerAdvertisement {
             peer_id: PeerId::from_public_key(&public_key),
             public_key,
-            capabilities: vec![PeerCapability::RelayedTransferV0],
+            capabilities: vec![PeerCapability::RelayedTransferV1],
             content_ids,
         }
     }
@@ -774,6 +840,9 @@ mod tests {
                 peers: 1,
                 relays: 1,
                 content_advertisements: 1,
+                expired_peers: 0,
+                expired_relays: 0,
+                expired_routes: 0,
             }
         );
         let receiver_route = registry.discover(0, content_id).unwrap();
@@ -791,7 +860,7 @@ mod tests {
         let mut registry = Registry::new(1_000);
         for seed in 1..=3 {
             let mut provider = peer(seed, vec![content_id]);
-            provider.capabilities.push(PeerCapability::SwarmTransferV0);
+            provider.capabilities.push(PeerCapability::SwarmTransferV1);
             registry.register_peer(0, provider).unwrap();
         }
         registry.register_relay(0, relay("relay-a", 7000)).unwrap();

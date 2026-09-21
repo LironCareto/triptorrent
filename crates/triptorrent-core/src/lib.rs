@@ -5,8 +5,14 @@ use core::str::FromStr;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Placeholder protocol version while the specification is pre-alpha.
-pub const PROTOCOL_VERSION: u16 = 0;
+/// Normative `TripTorrent` Testnet wire-protocol version.
+pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Network identifier for the first public, explicitly experimental testnet.
+pub const NETWORK_ID: &str = "triptorrent-testnet-1";
+
+/// Replaceable discovery profile used by the first public testnet.
+pub const DISCOVERY_PROFILE: &str = "m2-testnet-bootstrap-v1";
 
 /// Fixed chunk size used by the experimental M1 content model.
 pub const CHUNK_SIZE: usize = 32 * 1024;
@@ -32,6 +38,12 @@ impl ContentId {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// Constructs an identifier from its normative 32-byte representation.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 }
 
@@ -63,6 +75,18 @@ impl PeerId {
     pub fn from_public_key(public_key: &[u8; 32]) -> Self {
         Self(*blake3::hash(public_key).as_bytes())
     }
+
+    /// Constructs a peer identifier from its normative 32-byte representation.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the raw 32-byte identifier.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 impl fmt::Display for PeerId {
@@ -80,6 +104,18 @@ impl ChunkId {
     #[must_use]
     pub fn digest(bytes: &[u8]) -> Self {
         Self(*blake3::hash(bytes).as_bytes())
+    }
+
+    /// Constructs a chunk identifier from its normative 32-byte representation.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the raw 32-byte identifier.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 

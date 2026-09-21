@@ -6,5 +6,8 @@ license.workspace = true
 repository.workspace = true
 description = "Opaque frame relay for the TripTorrent M1 prototype"
 
+[dependencies]
+triptorrent-core = { path = "../triptorrent-core" }
+
 [lints]
 workspace = true

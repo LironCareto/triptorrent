@@ -259,7 +259,7 @@ pub fn share_file_via_overlay_with_control(
     let advertisement = PeerAdvertisement {
         peer_id: PeerId::from_public_key(&keypair.public),
         public_key: keypair.public,
-        capabilities: vec![PeerCapability::SwarmTransferV0],
+        capabilities: vec![PeerCapability::SwarmTransferV1],
         content_ids: vec![content_id],
     };
     let client = BootstrapClient::new(bootstrap);

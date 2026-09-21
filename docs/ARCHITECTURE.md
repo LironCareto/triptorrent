@@ -132,4 +132,12 @@ M8 leaves the M1-M7 architecture intact and makes implementation resource polici
 
 The `fuzz/` package is isolated from the stable workspace so long libFuzzer campaigns do not affect Windows development or normal CI. Stable deterministic regressions and property tests remain in their owning crates. `triptorrent-overlay::research` adds fixed-seed Monte Carlo scenarios, while `traffic_analysis` is a synthetic metadata-only model using real encoded message sizes. Neither is a production networking component.
 
+## M9 Testnet v1 boundary
+
+M9 replaces the external version-0 Postcard wire with the explicit binary protocol in `spec/testnet-v1.md`. `triptorrent-protocol` owns the reference codec; it does not define policy, storage, or UI behavior. Bootstrap requests, relay registration, and encrypted application records independently carry protocol `1` and network `triptorrent-testnet-1`, with no downgrade path.
+
+The network stack remains layered: `m2-testnet-bootstrap-v1` produces a provider key, relay address, and opaque route; `triptorrent-net` establishes Noise KN over the relay; `triptorrent-protocol` exchanges manifests and chunks; `triptorrent-swarm` schedules work; `triptorrent-node` owns persistence; CLI/desktop remain local API clients. Replacing the centralized discovery profile with a future M3 implementation does not redefine content or swarm messages.
+
+The independent Python receiver and shared fixed vectors make the specification, rather than Rust enum layout, the interoperability authority. Docker/systemd artifacts operate only bootstrap/relay services and never expose the loopback node API.
+
 The bounds are reference-implementation policy for the current prototype, except where [the draft specification](../spec/README.md) records current experimental wire validity. M2 remains unauthenticated scaffolding, and M8 does not add identity cost, traffic padding, cover traffic, public-testnet operations or production M3 discovery. See the [M8 report](M8_ADVERSARIAL_TESTING.md).

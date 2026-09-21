@@ -39,7 +39,7 @@ Without that runtime path, Windows displays a missing `clang_rt.asan_dynamic-x86
 
 ## Attack surfaces and controls
 
-- Application and overlay Postcard decoding rejects inputs over 1 MiB and 256 KiB respectively, validates semantic collection bounds, manifest shape, availability padding, identities, routes and error lengths, and exercises experimental conformance vectors.
+- At the M8 revision, application and overlay Postcard decoding rejected inputs over 1 MiB and 256 KiB respectively, validated semantic collection bounds, manifest shape, availability padding, identities, routes and error lengths, and exercised experimental conformance vectors. M9 supersedes this external codec with Testnet v1.
 - Relay registration accepts restricted 128-byte route names. Concurrent registration readers (256), pending routes (1,024), active pairs (256), stale registrations (30 seconds) and opaque frames (1 MiB) are bounded. Slow or malformed connections are isolated; duplicate roles and completed-route reuse fail closed.
 - The M2 registry bounds peers (4,096), relays (256), content IDs per peer (256), discovery results (16) and queued assignments per provider (64). The control service caps concurrent handlers at 256.
 - Manifests retain the fixed 32 KiB chunk size and cap content at 32 GiB / 1,048,576 chunks. Resume state is capped at 40 MiB and cannot promote bytes unless each claimed chunk verifies.
@@ -69,12 +69,12 @@ In the fixed single-prefix targeted-Sybil scenario, closest-node placement put 8
 
 | Scenario | Content bytes | Providers | Rate B/s | Retries / pauses | Frames | Framed bytes | Duration ms |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| small-single | 65,536 | 1 | unlimited | 0 / 0 | 8 | 65,984 | 7 |
-| small-paused | 65,536 | 2 | 32,768 | 1 / 1 | 14 | 66,316 | 8,010 |
-| medium-single | 1,048,576 | 1 | unlimited | 0 / 0 | 68 | 1,052,417 | 67 |
-| medium-swarm | 1,048,576 | 4 | 262,144 | 2 / 0 | 84 | 1,056,256 | 4,299 |
-| large-single | 4,194,304 | 1 | unlimited | 0 / 0 | 260 | 4,209,008 | 259 |
-| large-paused | 4,194,304 | 4 | 524,288 | 3 / 1 | 278 | 4,222,154 | 13,399 |
+| small-single | 65,536 | 1 | unlimited | 0 / 0 | 8 | 66,181 | 7 |
+| small-paused | 65,536 | 2 | 32,768 | 1 / 1 | 14 | 66,646 | 8,010 |
+| medium-single | 1,048,576 | 1 | unlimited | 0 / 0 | 68 | 1,054,504 | 67 |
+| medium-swarm | 1,048,576 | 4 | 262,144 | 2 / 0 | 84 | 1,058,680 | 4,299 |
+| large-single | 4,194,304 | 1 | unlimited | 0 / 0 | 260 | 4,217,140 | 259 |
+| large-paused | 4,194,304 | 4 | 524,288 | 3 / 1 | 278 | 4,230,676 | 13,399 |
 
 Content-size rank was recovered in 12/12 pair comparisons; a nearest-size classifier identified 6/6 scenarios; repeated shapes had an identical direction/size fingerprint. The modeled bootstrap-to-relay delta was 100 ms. Current transfers are therefore readily distinguishable in this controlled model. Padding, batching, cover traffic and timing defenses remain separate design research.
 

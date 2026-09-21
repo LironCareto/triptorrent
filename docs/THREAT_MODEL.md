@@ -118,3 +118,11 @@ The table records associations available to cooperating roles in the current pro
 The M8 traffic model recovered content-size order in 12/12 comparisons and classified 6/6 checked transfer shapes using byte counts alone. The fixed-seed discovery model also retained 68.7-75% repeated-key linkability across candidates. These controlled model results show that encryption does not hide size, cadence or timing. They are not Internet-scale probabilities.
 
 M8 adds bounds that turn several memory/thread growth paths into bounded denial of service. It does not authenticate M2 registrations or failure reports, prevent clients from occupying relay capacity, establish Sybil identity cost, or resist a global passive observer. Detailed findings and the controlled-testnet gate are in [M8_FINDINGS.md](M8_FINDINGS.md).
+
+## M9 public-testnet profile
+
+Testnet v1 closes accidental protocol/network cross-talk and version downgrade: all bootstrap, relay-registration, and peer application boundaries reject missing, malformed, wrong-network, or unsupported-version data. Fixed widths, lengths, state ordering, and reduced manifest bounds remove dependence on Rust/Serde wire behavior. These controls provide compatibility isolation and bounded parsing, not participant authorization.
+
+The M9 discovery profile is still the centralized M2 design. Registrations, advertised keys, relay claims, and failure reports remain unauthenticated. The bootstrap can observe or manipulate the provider/query graph and a malicious or compromised bootstrap can censor or substitute routes/keys. Relays cannot decrypt application records but see endpoint pairs, route IDs, timing, sizes, and duration. Operator event logs contain counts and timing and must be treated as sensitive even though content IDs and secrets are deliberately omitted.
+
+M8's traffic classification and Sybil/eclipse findings remain applicable. M9 adds no cover traffic, batching, identity cost, routing-table defense, global-observer resistance, or production M3 discovery. The testnet must not be used for privacy-sensitive transfers. Public deployment remains blocked until private vulnerability reporting and external validation are operational.

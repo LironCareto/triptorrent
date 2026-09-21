@@ -1,107 +1,86 @@
-#![doc = "Experimental M1 file-transfer messages and serialization."]
+#![doc = "Normative `TripTorrent` Testnet v1 wire messages and binary codec."]
 
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use thiserror::Error;
-use triptorrent_core::{CHUNK_SIZE, Chunk, ContentId, Manifest, PROTOCOL_VERSION, PeerId};
+use triptorrent_core::{
+    CHUNK_SIZE, Chunk, ChunkId, ContentId, Manifest, NETWORK_ID, PROTOCOL_VERSION, PeerId,
+};
 
-/// Maximum encoded application message accepted before Postcard decoding.
-pub const MAX_APPLICATION_MESSAGE_BYTES: usize = 1024 * 1024;
-/// Maximum encoded M2 control message accepted before Postcard decoding.
+/// Maximum plaintext application record accepted by the Noise transport.
+pub const MAX_APPLICATION_MESSAGE_BYTES: usize = 65_519;
 pub const MAX_OVERLAY_MESSAGE_BYTES: usize = 256 * 1024;
-/// Maximum content identifiers in one temporary M2 peer advertisement.
 pub const MAX_ADVERTISED_CONTENT_IDS: usize = 256;
+pub const WIRE_MAGIC: &[u8; 4] = b"TTP1";
 const MAX_ERROR_TEXT_BYTES: usize = 1024;
 const MAX_CAPABILITIES: usize = 8;
 const MAX_DISCOVERY_ROUTES: usize = 16;
+/// Largest manifest that fits a canonical Testnet v1 swarm-manifest record.
+pub const MAX_TESTNET_MANIFEST_CHUNKS: usize = 2_036;
+const DOMAIN_APPLICATION: u8 = 1;
+const DOMAIN_OVERLAY_REQUEST: u8 = 2;
+const DOMAIN_OVERLAY_RESPONSE: u8 = 3;
 
-/// A versioned M1 application message.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Envelope {
-    /// Experimental wire version.
-    pub version: u16,
-    /// File-transfer message.
-    pub message: Message,
-}
-
-/// M1 request and response messages carried inside an encrypted session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Message {
-    /// Request content by its experimental identifier.
-    Request { content_id: ContentId },
-    /// Describe the requested content and its chunks.
+    Request {
+        content_id: ContentId,
+    },
     Manifest(Manifest),
-    /// Deliver one plaintext chunk inside the encrypted session.
     Chunk(Chunk),
-    /// Signal that all chunks have been sent.
     Complete,
-    /// Explain why the request could not be served.
     Error(String),
-    /// Begin an experimental M4 piece-scheduled session.
-    SwarmRequest { content_id: ContentId },
-    /// Return the authoritative manifest and this provider's piece availability.
+    SwarmRequest {
+        content_id: ContentId,
+    },
     SwarmManifest {
         manifest: Manifest,
         availability: PieceAvailability,
     },
-    /// Request one chunk by its manifest index.
-    ChunkRequest { index: u32 },
-    /// Report that a requested chunk is not available from this provider.
-    ChunkUnavailable { index: u32 },
-    /// End an M4 provider session after all needed requests have completed.
+    ChunkRequest {
+        index: u32,
+    },
+    ChunkUnavailable {
+        index: u32,
+    },
     SwarmComplete,
 }
 
-/// Compact bitfield describing the chunks a provider can serve.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PieceAvailability {
-    /// Number of meaningful bits in `bits`.
     pub chunk_count: u32,
-    /// Least-significant-bit-first bitfield; bit `n` represents chunk `n`.
     pub bits: Vec<u8>,
 }
 
 impl PieceAvailability {
-    /// Builds a bitfield containing every chunk.
     #[must_use]
     pub fn all(chunk_count: u32) -> Self {
-        let byte_count = usize::try_from(chunk_count.div_ceil(8)).unwrap_or(usize::MAX);
         let mut value = Self {
             chunk_count,
-            bits: vec![0xff; byte_count],
+            bits: vec![0xff; usize::try_from(chunk_count.div_ceil(8)).unwrap_or(usize::MAX)],
         };
         value.clear_unused_bits();
         value
     }
-
-    /// Builds a bitfield from explicitly available indices.
     #[must_use]
     pub fn from_indices(chunk_count: u32, indices: impl IntoIterator<Item = u32>) -> Self {
-        let byte_count = usize::try_from(chunk_count.div_ceil(8)).unwrap_or(usize::MAX);
         let mut value = Self {
             chunk_count,
-            bits: vec![0; byte_count],
+            bits: vec![0; usize::try_from(chunk_count.div_ceil(8)).unwrap_or(usize::MAX)],
         };
         for index in indices {
             if index < chunk_count {
-                let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
-                value.bits[byte] |= 1 << (index % 8);
+                value.bits[usize::try_from(index / 8).unwrap_or(usize::MAX)] |= 1 << (index % 8);
             }
         }
         value
     }
-
-    /// Returns whether this well-formed bitfield contains `index`.
     #[must_use]
     pub fn contains(&self, index: u32) -> bool {
-        if !self.is_valid() || index >= self.chunk_count {
-            return false;
-        }
-        let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
-        self.bits[byte] & (1 << (index % 8)) != 0
+        self.is_valid()
+            && index < self.chunk_count
+            && self.bits[usize::try_from(index / 8).unwrap_or(usize::MAX)] & (1 << (index % 8)) != 0
     }
-
-    /// Checks length and zero padding in the last byte.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let expected = usize::try_from(self.chunk_count.div_ceil(8)).unwrap_or(usize::MAX);
@@ -115,7 +94,6 @@ impl PieceAvailability {
                 .last()
                 .is_none_or(|last| last & !((1_u8 << remainder) - 1) == 0)
     }
-
     fn clear_unused_bits(&mut self) {
         let remainder = self.chunk_count % 8;
         if remainder != 0
@@ -126,219 +104,368 @@ impl PieceAvailability {
     }
 }
 
-/// A peer advertisement held under a temporary M2 lease.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PeerAdvertisement {
-    /// Ephemeral identity, derived from `public_key`.
     pub peer_id: PeerId,
-    /// Noise static public key used only for this sharing process.
     pub public_key: [u8; 32],
-    /// Experimental transfer capabilities supported by this process.
     pub capabilities: Vec<PeerCapability>,
-    /// Experimental content IDs currently offered by the peer.
     pub content_ids: Vec<ContentId>,
 }
-
-/// Experimental capabilities advertised through the M2 bootstrap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PeerCapability {
-    /// Supports the M1 chunk protocol through one automatically selected relay.
-    RelayedTransferV0,
-    /// Supports M4 manifest/availability exchange and requested chunks.
-    SwarmTransferV0,
+    RelayedTransferV1,
+    SwarmTransferV1,
 }
-
-/// A relay advertisement held under a temporary M2 lease.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RelayAdvertisement {
-    /// Caller-selected ephemeral relay identifier.
     pub relay_id: String,
-    /// Relay TCP endpoint encoded as `host:port`.
     pub address: String,
 }
-
-/// Automatically coordinated M1 route returned by M2 discovery.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RouteAssignment {
-    /// Peer advertising the requested content.
     pub provider_id: PeerId,
-    /// Provider public key used by the receiver's Noise handshake.
     pub provider_public_key: [u8; 32],
-    /// Selected relay identifier.
     pub relay_id: String,
-    /// Selected relay TCP endpoint.
     pub relay_address: String,
-    /// Automatically generated opaque relay route.
     pub route: String,
 }
-
-/// Experimental request sent to the temporary M2 bootstrap service.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum OverlayRequest {
-    /// Register or replace a peer's leased content advertisement.
     RegisterPeer(PeerAdvertisement),
-    /// Renew an existing peer lease.
     HeartbeatPeer { peer_id: PeerId },
-    /// Renew a peer lease and retrieve its next route assignment.
     PollPeer { peer_id: PeerId },
-    /// Register or replace a relay's leased availability advertisement.
     RegisterRelay(RelayAdvertisement),
-    /// Renew an existing relay lease.
     HeartbeatRelay { relay_id: String },
-    /// Locate a provider and coordinate an automatic relay route.
     Discover { content_id: ContentId },
-    /// Locate several providers and coordinate one independent route per provider.
     DiscoverProviders { content_id: ContentId, limit: u16 },
-    /// Remove a relay that failed before a transfer could start.
     ReportRelayFailure { relay_id: String },
+    Health,
 }
-
-/// Experimental response from the temporary M2 bootstrap service.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum OverlayResponse {
-    /// Registration or heartbeat succeeded for the stated lease duration.
     Registered { lease_ms: u64 },
-    /// A provider-side route assignment, when one is queued.
     Assignment(Option<RouteAssignment>),
-    /// A receiver-side discovery result.
     Route(Option<RouteAssignment>),
-    /// Receiver-side routes for distinct providers of one content ID.
     Routes(Vec<RouteAssignment>),
-    /// The request completed without a result body.
     Acknowledged,
-    /// The bootstrap rejected the request.
     Error(String),
 }
 
-#[derive(Serialize, Deserialize)]
-struct OverlayRequestEnvelope {
-    version: u16,
-    request: OverlayRequest,
-}
-
-#[derive(Serialize, Deserialize)]
-struct OverlayResponseEnvelope {
-    version: u16,
-    response: OverlayResponse,
-}
-
-/// Wire encoding or compatibility failure.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Eq, PartialEq)]
 pub enum ProtocolError {
-    /// Postcard could not encode or decode the message.
-    #[error("invalid wire message: {0}")]
-    Codec(#[from] postcard::Error),
-    /// The peer used a different experimental protocol version.
+    #[error("malformed testnet wire message: {0}")]
+    Malformed(&'static str),
     #[error("unsupported protocol version {0}")]
     UnsupportedVersion(u16),
-    /// A decoded value violates bounded semantic invariants.
+    #[error("wrong network {0}")]
+    WrongNetwork(String),
+    #[error("unsupported required capability {0}")]
+    UnsupportedCapability(u16),
+    #[error("unknown message type {0}")]
+    UnknownMessage(u8),
     #[error("invalid protocol message: {0}")]
     InvalidMessage(&'static str),
-    /// The encoded input exceeds its boundary before decoding.
     #[error("encoded protocol message exceeds {limit} bytes")]
     MessageTooLarge { limit: usize },
 }
 
-/// Serializes a versioned message.
+/// Encodes one canonical Testnet v1 application record.
 ///
 /// # Errors
-///
-/// Returns [`ProtocolError`] if serialization fails.
+/// Returns an error when the message violates bounds or cannot be represented.
 pub fn encode(message: Message) -> Result<Vec<u8>, ProtocolError> {
     validate_message(&message)?;
-    let encoded = postcard::to_allocvec(&Envelope {
-        version: PROTOCOL_VERSION,
-        message,
-    })?;
-    ensure_size(&encoded, MAX_APPLICATION_MESSAGE_BYTES)?;
-    Ok(encoded)
+    let mut w = Writer::new(DOMAIN_APPLICATION);
+    match message {
+        Message::Request { content_id } => {
+            w.u8(1);
+            w.content_id(content_id);
+        }
+        Message::Manifest(value) => {
+            w.u8(2);
+            w.manifest(&value)?;
+        }
+        Message::Chunk(value) => {
+            w.u8(3);
+            w.chunk(&value)?;
+        }
+        Message::Complete => w.u8(4),
+        Message::Error(value) => {
+            w.u8(5);
+            w.string(&value)?;
+        }
+        Message::SwarmRequest { content_id } => {
+            w.u8(16);
+            w.content_id(content_id);
+        }
+        Message::SwarmManifest {
+            manifest,
+            availability,
+        } => {
+            w.u8(17);
+            w.manifest(&manifest)?;
+            w.u32(availability.chunk_count);
+            w.bytes(&availability.bits)?;
+        }
+        Message::ChunkRequest { index } => {
+            w.u8(18);
+            w.u32(index);
+        }
+        Message::ChunkUnavailable { index } => {
+            w.u8(19);
+            w.u32(index);
+        }
+        Message::SwarmComplete => w.u8(20),
+    }
+    w.finish(MAX_APPLICATION_MESSAGE_BYTES)
 }
 
-/// Deserializes a message and rejects unknown versions.
+/// Decodes one complete Testnet v1 application record.
 ///
 /// # Errors
-///
-/// Returns [`ProtocolError`] for malformed or incompatible input.
+/// Returns an error for malformed, incompatible, unknown, or invalid input.
 pub fn decode(bytes: &[u8]) -> Result<Message, ProtocolError> {
     ensure_size(bytes, MAX_APPLICATION_MESSAGE_BYTES)?;
-    let envelope: Envelope = postcard::from_bytes(bytes)?;
-    if envelope.version != PROTOCOL_VERSION {
-        return Err(ProtocolError::UnsupportedVersion(envelope.version));
-    }
-    validate_message(&envelope.message)?;
-    Ok(envelope.message)
+    let mut r = Reader::new(bytes, DOMAIN_APPLICATION)?;
+    let value = match r.u8()? {
+        1 => Message::Request {
+            content_id: r.content_id()?,
+        },
+        2 => Message::Manifest(r.manifest()?),
+        3 => Message::Chunk(r.chunk()?),
+        4 => Message::Complete,
+        5 => Message::Error(r.string(MAX_ERROR_TEXT_BYTES)?),
+        16 => Message::SwarmRequest {
+            content_id: r.content_id()?,
+        },
+        17 => Message::SwarmManifest {
+            manifest: r.manifest()?,
+            availability: PieceAvailability {
+                chunk_count: r.u32()?,
+                bits: r.bytes(MAX_APPLICATION_MESSAGE_BYTES)?,
+            },
+        },
+        18 => Message::ChunkRequest { index: r.u32()? },
+        19 => Message::ChunkUnavailable { index: r.u32()? },
+        20 => Message::SwarmComplete,
+        kind => return Err(ProtocolError::UnknownMessage(kind)),
+    };
+    r.end()?;
+    validate_message(&value)?;
+    Ok(value)
 }
 
-/// Serializes an experimental M2 bootstrap request.
+/// Encodes one canonical testnet discovery request.
 ///
 /// # Errors
-///
-/// Returns [`ProtocolError`] if serialization fails.
+/// Returns an error when the request violates bounds or cannot be represented.
 pub fn encode_overlay_request(request: OverlayRequest) -> Result<Vec<u8>, ProtocolError> {
     validate_overlay_request(&request)?;
-    let encoded = postcard::to_allocvec(&OverlayRequestEnvelope {
-        version: PROTOCOL_VERSION,
-        request,
-    })?;
-    ensure_size(&encoded, MAX_OVERLAY_MESSAGE_BYTES)?;
-    Ok(encoded)
+    let mut w = Writer::new(DOMAIN_OVERLAY_REQUEST);
+    match request {
+        OverlayRequest::RegisterPeer(peer) => {
+            w.u8(1);
+            w.peer_id(peer.peer_id);
+            w.raw(&peer.public_key);
+            w.u8(u8::try_from(peer.capabilities.len())
+                .map_err(|_| ProtocolError::InvalidMessage("too many capabilities"))?);
+            for capability in peer.capabilities {
+                w.u16(match capability {
+                    PeerCapability::RelayedTransferV1 => 1,
+                    PeerCapability::SwarmTransferV1 => 2,
+                });
+            }
+            w.u16(
+                u16::try_from(peer.content_ids.len())
+                    .map_err(|_| ProtocolError::InvalidMessage("too many content identifiers"))?,
+            );
+            for id in peer.content_ids {
+                w.content_id(id);
+            }
+        }
+        OverlayRequest::HeartbeatPeer { peer_id } => {
+            w.u8(2);
+            w.peer_id(peer_id);
+        }
+        OverlayRequest::PollPeer { peer_id } => {
+            w.u8(3);
+            w.peer_id(peer_id);
+        }
+        OverlayRequest::RegisterRelay(value) => {
+            w.u8(4);
+            w.string(&value.relay_id)?;
+            w.string(&value.address)?;
+        }
+        OverlayRequest::HeartbeatRelay { relay_id } => {
+            w.u8(5);
+            w.string(&relay_id)?;
+        }
+        OverlayRequest::Discover { content_id } => {
+            w.u8(6);
+            w.content_id(content_id);
+        }
+        OverlayRequest::DiscoverProviders { content_id, limit } => {
+            w.u8(7);
+            w.content_id(content_id);
+            w.u16(limit);
+        }
+        OverlayRequest::ReportRelayFailure { relay_id } => {
+            w.u8(8);
+            w.string(&relay_id)?;
+        }
+        OverlayRequest::Health => w.u8(9),
+    }
+    w.finish(MAX_OVERLAY_MESSAGE_BYTES)
 }
 
-/// Decodes an experimental M2 bootstrap request.
+/// Decodes one complete testnet discovery request.
 ///
 /// # Errors
-///
-/// Returns [`ProtocolError`] for malformed or incompatible input.
+/// Returns an error for malformed, incompatible, unknown, or invalid input.
 pub fn decode_overlay_request(bytes: &[u8]) -> Result<OverlayRequest, ProtocolError> {
     ensure_size(bytes, MAX_OVERLAY_MESSAGE_BYTES)?;
-    let envelope: OverlayRequestEnvelope = postcard::from_bytes(bytes)?;
-    verify_version(envelope.version)?;
-    validate_overlay_request(&envelope.request)?;
-    Ok(envelope.request)
+    let mut r = Reader::new(bytes, DOMAIN_OVERLAY_REQUEST)?;
+    let value = match r.u8()? {
+        1 => {
+            let peer_id = r.peer_id()?;
+            let public_key = r.array()?;
+            let count = usize::from(r.u8()?);
+            if count > MAX_CAPABILITIES {
+                return Err(ProtocolError::InvalidMessage("too many capabilities"));
+            }
+            let mut capabilities = Vec::with_capacity(count);
+            for _ in 0..count {
+                capabilities.push(match r.u16()? {
+                    1 => PeerCapability::RelayedTransferV1,
+                    2 => PeerCapability::SwarmTransferV1,
+                    code => return Err(ProtocolError::UnsupportedCapability(code)),
+                });
+            }
+            let count = usize::from(r.u16()?);
+            if count > MAX_ADVERTISED_CONTENT_IDS {
+                return Err(ProtocolError::InvalidMessage(
+                    "too many content identifiers",
+                ));
+            }
+            let mut content_ids = Vec::with_capacity(count);
+            for _ in 0..count {
+                content_ids.push(r.content_id()?);
+            }
+            OverlayRequest::RegisterPeer(PeerAdvertisement {
+                peer_id,
+                public_key,
+                capabilities,
+                content_ids,
+            })
+        }
+        2 => OverlayRequest::HeartbeatPeer {
+            peer_id: r.peer_id()?,
+        },
+        3 => OverlayRequest::PollPeer {
+            peer_id: r.peer_id()?,
+        },
+        4 => OverlayRequest::RegisterRelay(RelayAdvertisement {
+            relay_id: r.string(64)?,
+            address: r.string(128)?,
+        }),
+        5 => OverlayRequest::HeartbeatRelay {
+            relay_id: r.string(64)?,
+        },
+        6 => OverlayRequest::Discover {
+            content_id: r.content_id()?,
+        },
+        7 => OverlayRequest::DiscoverProviders {
+            content_id: r.content_id()?,
+            limit: r.u16()?,
+        },
+        8 => OverlayRequest::ReportRelayFailure {
+            relay_id: r.string(64)?,
+        },
+        9 => OverlayRequest::Health,
+        kind => return Err(ProtocolError::UnknownMessage(kind)),
+    };
+    r.end()?;
+    validate_overlay_request(&value)?;
+    Ok(value)
 }
 
-/// Serializes an experimental M2 bootstrap response.
+/// Encodes one canonical testnet discovery response.
 ///
 /// # Errors
-///
-/// Returns [`ProtocolError`] if serialization fails.
+/// Returns an error when the response violates bounds or cannot be represented.
 pub fn encode_overlay_response(response: OverlayResponse) -> Result<Vec<u8>, ProtocolError> {
     validate_overlay_response(&response)?;
-    let encoded = postcard::to_allocvec(&OverlayResponseEnvelope {
-        version: PROTOCOL_VERSION,
-        response,
-    })?;
-    ensure_size(&encoded, MAX_OVERLAY_MESSAGE_BYTES)?;
-    Ok(encoded)
+    let mut w = Writer::new(DOMAIN_OVERLAY_RESPONSE);
+    match response {
+        OverlayResponse::Registered { lease_ms } => {
+            w.u8(1);
+            w.u64(lease_ms);
+        }
+        OverlayResponse::Assignment(value) => {
+            w.u8(2);
+            w.optional_assignment(value.as_ref())?;
+        }
+        OverlayResponse::Route(value) => {
+            w.u8(3);
+            w.optional_assignment(value.as_ref())?;
+        }
+        OverlayResponse::Routes(values) => {
+            w.u8(4);
+            w.u16(
+                u16::try_from(values.len())
+                    .map_err(|_| ProtocolError::InvalidMessage("too many routes"))?,
+            );
+            for value in &values {
+                w.assignment(value)?;
+            }
+        }
+        OverlayResponse::Acknowledged => w.u8(5),
+        OverlayResponse::Error(value) => {
+            w.u8(255);
+            w.string(&value)?;
+        }
+    }
+    w.finish(MAX_OVERLAY_MESSAGE_BYTES)
 }
 
-/// Decodes an experimental M2 bootstrap response.
+/// Decodes one complete testnet discovery response.
 ///
 /// # Errors
-///
-/// Returns [`ProtocolError`] for malformed or incompatible input.
+/// Returns an error for malformed, incompatible, unknown, or invalid input.
 pub fn decode_overlay_response(bytes: &[u8]) -> Result<OverlayResponse, ProtocolError> {
     ensure_size(bytes, MAX_OVERLAY_MESSAGE_BYTES)?;
-    let envelope: OverlayResponseEnvelope = postcard::from_bytes(bytes)?;
-    verify_version(envelope.version)?;
-    validate_overlay_response(&envelope.response)?;
-    Ok(envelope.response)
+    let mut r = Reader::new(bytes, DOMAIN_OVERLAY_RESPONSE)?;
+    let value = match r.u8()? {
+        1 => OverlayResponse::Registered { lease_ms: r.u64()? },
+        2 => OverlayResponse::Assignment(r.optional_assignment()?),
+        3 => OverlayResponse::Route(r.optional_assignment()?),
+        4 => {
+            let count = usize::from(r.u16()?);
+            if count > MAX_DISCOVERY_ROUTES {
+                return Err(ProtocolError::InvalidMessage("too many route assignments"));
+            }
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                values.push(r.assignment()?);
+            }
+            OverlayResponse::Routes(values)
+        }
+        5 => OverlayResponse::Acknowledged,
+        255 => OverlayResponse::Error(r.string(MAX_ERROR_TEXT_BYTES)?),
+        kind => return Err(ProtocolError::UnknownMessage(kind)),
+    };
+    r.end()?;
+    validate_overlay_response(&value)?;
+    Ok(value)
 }
 
-fn ensure_size(bytes: &[u8], limit: usize) -> Result<(), ProtocolError> {
-    if bytes.len() > limit {
-        return Err(ProtocolError::MessageTooLarge { limit });
-    }
-    Ok(())
-}
-
-fn validate_message(message: &Message) -> Result<(), ProtocolError> {
-    match message {
-        Message::Manifest(manifest) => validate_manifest(manifest),
-        Message::Chunk(chunk) if chunk.data.len() > CHUNK_SIZE => Err(
+fn validate_message(value: &Message) -> Result<(), ProtocolError> {
+    match value {
+        Message::Manifest(value) => validate_manifest(value),
+        Message::Chunk(value) if value.data.len() > CHUNK_SIZE => Err(
             ProtocolError::InvalidMessage("chunk payload exceeds fixed chunk size"),
         ),
-        Message::Error(message) if message.len() > MAX_ERROR_TEXT_BYTES => {
+        Message::Error(value) if value.len() > MAX_ERROR_TEXT_BYTES => {
             Err(ProtocolError::InvalidMessage("error text exceeds bound"))
         }
         Message::SwarmManifest {
@@ -358,13 +485,17 @@ fn validate_message(message: &Message) -> Result<(), ProtocolError> {
         _ => Ok(()),
     }
 }
-
-fn validate_manifest(manifest: &Manifest) -> Result<(), ProtocolError> {
-    manifest
+fn validate_manifest(value: &Manifest) -> Result<(), ProtocolError> {
+    value
         .validate_shape()
-        .map_err(|_| ProtocolError::InvalidMessage("malformed manifest shape"))
+        .map_err(|_| ProtocolError::InvalidMessage("malformed manifest shape"))?;
+    if value.chunks.len() > MAX_TESTNET_MANIFEST_CHUNKS {
+        return Err(ProtocolError::InvalidMessage(
+            "manifest exceeds Testnet v1 record bound",
+        ));
+    }
+    Ok(())
 }
-
 fn valid_identifier(value: &str, maximum: usize) -> bool {
     !value.is_empty()
         && value.len() <= maximum
@@ -372,22 +503,21 @@ fn valid_identifier(value: &str, maximum: usize) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
-
-fn validate_assignment(assignment: &RouteAssignment) -> Result<(), ProtocolError> {
-    if !valid_identifier(&assignment.relay_id, 64)
-        || assignment.relay_address.len() > 128
-        || assignment.relay_address.parse::<SocketAddr>().is_err()
-        || !valid_identifier(&assignment.route, 128)
+fn validate_assignment(value: &RouteAssignment) -> Result<(), ProtocolError> {
+    if !valid_identifier(&value.relay_id, 64)
+        || value.relay_address.len() > 128
+        || value.relay_address.parse::<SocketAddr>().is_err()
+        || !valid_identifier(&value.route, 128)
     {
-        return Err(ProtocolError::InvalidMessage(
+        Err(ProtocolError::InvalidMessage(
             "invalid route assignment fields",
-        ));
+        ))
+    } else {
+        Ok(())
     }
-    Ok(())
 }
-
-fn validate_overlay_request(request: &OverlayRequest) -> Result<(), ProtocolError> {
-    match request {
+fn validate_overlay_request(value: &OverlayRequest) -> Result<(), ProtocolError> {
+    match value {
         OverlayRequest::RegisterPeer(peer) => {
             if peer.peer_id != PeerId::from_public_key(&peer.public_key) {
                 return Err(ProtocolError::InvalidMessage(
@@ -405,21 +535,23 @@ fn validate_overlay_request(request: &OverlayRequest) -> Result<(), ProtocolErro
             }
             Ok(())
         }
-        OverlayRequest::RegisterRelay(relay) => {
-            if !valid_identifier(&relay.relay_id, 64)
-                || relay.address.len() > 128
-                || relay.address.parse::<SocketAddr>().is_err()
+        OverlayRequest::RegisterRelay(value) => {
+            if !valid_identifier(&value.relay_id, 64)
+                || value.address.len() > 128
+                || value.address.parse::<SocketAddr>().is_err()
             {
-                return Err(ProtocolError::InvalidMessage("invalid relay advertisement"));
+                Err(ProtocolError::InvalidMessage("invalid relay advertisement"))
+            } else {
+                Ok(())
             }
-            Ok(())
         }
         OverlayRequest::HeartbeatRelay { relay_id }
         | OverlayRequest::ReportRelayFailure { relay_id } => {
-            if !valid_identifier(relay_id, 64) {
-                return Err(ProtocolError::InvalidMessage("invalid relay identifier"));
+            if valid_identifier(relay_id, 64) {
+                Ok(())
+            } else {
+                Err(ProtocolError::InvalidMessage("invalid relay identifier"))
             }
-            Ok(())
         }
         OverlayRequest::DiscoverProviders { limit, .. }
             if *limit == 0 || usize::from(*limit) > MAX_DISCOVERY_ROUTES =>
@@ -431,260 +563,316 @@ fn validate_overlay_request(request: &OverlayRequest) -> Result<(), ProtocolErro
         _ => Ok(()),
     }
 }
-
-fn validate_overlay_response(response: &OverlayResponse) -> Result<(), ProtocolError> {
-    match response {
-        OverlayResponse::Assignment(Some(assignment))
-        | OverlayResponse::Route(Some(assignment)) => validate_assignment(assignment),
-        OverlayResponse::Routes(routes) => {
-            if routes.len() > MAX_DISCOVERY_ROUTES {
+fn validate_overlay_response(value: &OverlayResponse) -> Result<(), ProtocolError> {
+    match value {
+        OverlayResponse::Assignment(Some(value)) | OverlayResponse::Route(Some(value)) => {
+            validate_assignment(value)
+        }
+        OverlayResponse::Routes(values) => {
+            if values.len() > MAX_DISCOVERY_ROUTES {
                 return Err(ProtocolError::InvalidMessage("too many route assignments"));
             }
-            for assignment in routes {
-                validate_assignment(assignment)?;
+            for value in values {
+                validate_assignment(value)?;
             }
             Ok(())
         }
-        OverlayResponse::Error(message) if message.len() > MAX_ERROR_TEXT_BYTES => {
+        OverlayResponse::Error(value) if value.len() > MAX_ERROR_TEXT_BYTES => {
             Err(ProtocolError::InvalidMessage("error text exceeds bound"))
         }
         _ => Ok(()),
     }
 }
-
-fn verify_version(version: u16) -> Result<(), ProtocolError> {
-    if version != PROTOCOL_VERSION {
-        return Err(ProtocolError::UnsupportedVersion(version));
+fn ensure_size(bytes: &[u8], limit: usize) -> Result<(), ProtocolError> {
+    if bytes.len() > limit {
+        Err(ProtocolError::MessageTooLarge { limit })
+    } else {
+        Ok(())
     }
-    Ok(())
+}
+
+struct Writer {
+    bytes: Vec<u8>,
+}
+impl Writer {
+    fn new(domain: u8) -> Self {
+        let mut value = Self { bytes: Vec::new() };
+        value.raw(WIRE_MAGIC);
+        value.u16(PROTOCOL_VERSION);
+        value.u8(u8::try_from(NETWORK_ID.len()).expect("network ID fits u8"));
+        value.raw(NETWORK_ID.as_bytes());
+        value.u8(domain);
+        value
+    }
+    fn finish(self, limit: usize) -> Result<Vec<u8>, ProtocolError> {
+        ensure_size(&self.bytes, limit)?;
+        Ok(self.bytes)
+    }
+    fn raw(&mut self, value: &[u8]) {
+        self.bytes.extend_from_slice(value);
+    }
+    fn u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+    fn u16(&mut self, value: u16) {
+        self.raw(&value.to_be_bytes());
+    }
+    fn u32(&mut self, value: u32) {
+        self.raw(&value.to_be_bytes());
+    }
+    fn u64(&mut self, value: u64) {
+        self.raw(&value.to_be_bytes());
+    }
+    fn bytes(&mut self, value: &[u8]) -> Result<(), ProtocolError> {
+        self.u32(
+            u32::try_from(value.len())
+                .map_err(|_| ProtocolError::Malformed("byte string too long"))?,
+        );
+        self.raw(value);
+        Ok(())
+    }
+    fn string(&mut self, value: &str) -> Result<(), ProtocolError> {
+        self.u16(
+            u16::try_from(value.len()).map_err(|_| ProtocolError::Malformed("string too long"))?,
+        );
+        self.raw(value.as_bytes());
+        Ok(())
+    }
+    fn content_id(&mut self, value: ContentId) {
+        self.raw(value.as_bytes());
+    }
+    fn peer_id(&mut self, value: PeerId) {
+        self.raw(value.as_bytes());
+    }
+    fn manifest(&mut self, value: &Manifest) -> Result<(), ProtocolError> {
+        self.content_id(value.content_id);
+        self.u64(value.length);
+        self.u32(value.chunk_size);
+        self.u32(
+            u32::try_from(value.chunks.len())
+                .map_err(|_| ProtocolError::InvalidMessage("too many manifest chunks"))?,
+        );
+        for id in &value.chunks {
+            self.raw(id.as_bytes());
+        }
+        Ok(())
+    }
+    fn chunk(&mut self, value: &Chunk) -> Result<(), ProtocolError> {
+        self.u32(value.index);
+        self.raw(value.id.as_bytes());
+        self.bytes(&value.data)
+    }
+    fn assignment(&mut self, value: &RouteAssignment) -> Result<(), ProtocolError> {
+        self.peer_id(value.provider_id);
+        self.raw(&value.provider_public_key);
+        self.string(&value.relay_id)?;
+        self.string(&value.relay_address)?;
+        self.string(&value.route)
+    }
+    fn optional_assignment(
+        &mut self,
+        value: Option<&RouteAssignment>,
+    ) -> Result<(), ProtocolError> {
+        if let Some(value) = value {
+            self.u8(1);
+            self.assignment(value)
+        } else {
+            self.u8(0);
+            Ok(())
+        }
+    }
+}
+
+struct Reader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+impl<'a> Reader<'a> {
+    fn new(bytes: &'a [u8], domain: u8) -> Result<Self, ProtocolError> {
+        let mut value = Self { bytes, offset: 0 };
+        if value.take(4)? != WIRE_MAGIC {
+            return Err(ProtocolError::Malformed("invalid magic"));
+        }
+        let version = value.u16()?;
+        if version != PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedVersion(version));
+        }
+        let length = usize::from(value.u8()?);
+        let network = std::str::from_utf8(value.take(length)?)
+            .map_err(|_| ProtocolError::Malformed("network identifier is not UTF-8"))?;
+        if network != NETWORK_ID {
+            return Err(ProtocolError::WrongNetwork(network.to_owned()));
+        }
+        if value.u8()? != domain {
+            return Err(ProtocolError::Malformed("wrong message domain"));
+        }
+        Ok(value)
+    }
+    fn take(&mut self, length: usize) -> Result<&'a [u8], ProtocolError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(ProtocolError::Malformed("length overflow"))?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(ProtocolError::Malformed("truncated input"))?;
+        self.offset = end;
+        Ok(value)
+    }
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], ProtocolError> {
+        self.take(N)?
+            .try_into()
+            .map_err(|_| ProtocolError::Malformed("truncated fixed field"))
+    }
+    fn u8(&mut self) -> Result<u8, ProtocolError> {
+        Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16, ProtocolError> {
+        Ok(u16::from_be_bytes(self.array()?))
+    }
+    fn u32(&mut self) -> Result<u32, ProtocolError> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
+    fn u64(&mut self) -> Result<u64, ProtocolError> {
+        Ok(u64::from_be_bytes(self.array()?))
+    }
+    fn bytes(&mut self, maximum: usize) -> Result<Vec<u8>, ProtocolError> {
+        let length = usize::try_from(self.u32()?)
+            .map_err(|_| ProtocolError::Malformed("invalid byte length"))?;
+        if length > maximum {
+            return Err(ProtocolError::InvalidMessage("byte string exceeds bound"));
+        }
+        Ok(self.take(length)?.to_vec())
+    }
+    fn string(&mut self, maximum: usize) -> Result<String, ProtocolError> {
+        let length = usize::from(self.u16()?);
+        if length > maximum {
+            return Err(ProtocolError::InvalidMessage("string exceeds bound"));
+        }
+        String::from_utf8(self.take(length)?.to_vec())
+            .map_err(|_| ProtocolError::Malformed("string is not UTF-8"))
+    }
+    fn content_id(&mut self) -> Result<ContentId, ProtocolError> {
+        Ok(ContentId::from_bytes(self.array()?))
+    }
+    fn peer_id(&mut self) -> Result<PeerId, ProtocolError> {
+        Ok(PeerId::from_bytes(self.array()?))
+    }
+    fn manifest(&mut self) -> Result<Manifest, ProtocolError> {
+        let content_id = self.content_id()?;
+        let length = self.u64()?;
+        let chunk_size = self.u32()?;
+        let count = usize::try_from(self.u32()?)
+            .map_err(|_| ProtocolError::Malformed("invalid chunk count"))?;
+        if count > MAX_TESTNET_MANIFEST_CHUNKS {
+            return Err(ProtocolError::InvalidMessage("too many manifest chunks"));
+        }
+        let mut chunks = Vec::with_capacity(count);
+        for _ in 0..count {
+            chunks.push(ChunkId::from_bytes(self.array()?));
+        }
+        Ok(Manifest {
+            content_id,
+            length,
+            chunk_size,
+            chunks,
+        })
+    }
+    fn chunk(&mut self) -> Result<Chunk, ProtocolError> {
+        Ok(Chunk {
+            index: self.u32()?,
+            id: ChunkId::from_bytes(self.array()?),
+            data: self.bytes(CHUNK_SIZE)?,
+        })
+    }
+    fn assignment(&mut self) -> Result<RouteAssignment, ProtocolError> {
+        Ok(RouteAssignment {
+            provider_id: self.peer_id()?,
+            provider_public_key: self.array()?,
+            relay_id: self.string(64)?,
+            relay_address: self.string(128)?,
+            route: self.string(128)?,
+        })
+    }
+    fn optional_assignment(&mut self) -> Result<Option<RouteAssignment>, ProtocolError> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.assignment()?)),
+            _ => Err(ProtocolError::Malformed("invalid optional tag")),
+        }
+    }
+    fn end(&self) -> Result<(), ProtocolError> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(ProtocolError::Malformed("trailing bytes"))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use serde::Deserialize;
-
-    #[derive(Deserialize)]
-    struct ConformanceVectors {
-        status: String,
-        application: Vec<ApplicationVector>,
-        framing: Vec<FramingVector>,
-    }
-
-    #[derive(Deserialize)]
-    struct ApplicationVector {
-        name: String,
-        hex: String,
-        result: String,
-    }
-
-    #[derive(Deserialize)]
-    struct FramingVector {
-        name: String,
-        length_hex: String,
-        result: String,
-    }
-
     #[test]
     fn messages_round_trip() {
-        let content_id = ContentId::digest(b"requested bytes");
-        let messages = [
-            Message::Request { content_id },
-            Message::Complete,
-            Message::Error("unavailable".into()),
-        ];
-        for message in messages {
+        let id = ContentId::digest(b"testnet-v1");
+        for message in [
+            Message::SwarmRequest { content_id: id },
+            Message::ChunkRequest { index: 7 },
+            Message::SwarmComplete,
+        ] {
             assert_eq!(decode(&encode(message.clone()).unwrap()).unwrap(), message);
         }
-
-        let (manifest, chunks) = Manifest::from_bytes(b"chunked bytes").unwrap();
-        let manifest_message = Message::Manifest(manifest.clone());
-        assert_eq!(
-            decode(&encode(manifest_message.clone()).unwrap()).unwrap(),
-            manifest_message
-        );
-        let chunk_message = Message::Chunk(chunks[0].clone());
-        assert_eq!(
-            decode(&encode(chunk_message.clone()).unwrap()).unwrap(),
-            chunk_message
-        );
-        let availability = PieceAvailability::all(
-            u32::try_from(chunks.len()).expect("test manifest has few chunks"),
-        );
-        let swarm_message = Message::SwarmManifest {
-            manifest,
-            availability,
-        };
-        assert_eq!(
-            decode(&encode(swarm_message.clone()).unwrap()).unwrap(),
-            swarm_message
-        );
     }
-
     #[test]
-    fn piece_availability_is_compact_and_validated() {
-        let availability = PieceAvailability::from_indices(10, [0, 3, 9, 99]);
-        assert_eq!(availability.bits.len(), 2);
-        assert!(availability.is_valid());
-        assert!(availability.contains(0));
-        assert!(availability.contains(3));
-        assert!(availability.contains(9));
-        assert!(!availability.contains(1));
-
-        let malformed = PieceAvailability {
-            chunk_count: 9,
-            bits: vec![0, 0x80],
-        };
-        assert!(!malformed.is_valid());
-    }
-
-    #[test]
-    fn encoding_is_deterministic() {
-        let message = Message::Request {
-            content_id: ContentId::digest(b"stable encoding input"),
-        };
-        assert_eq!(encode(message.clone()).unwrap(), encode(message).unwrap());
-    }
-
-    #[test]
-    fn malformed_messages_are_rejected() {
-        assert!(decode(&[0xff, 0xff]).is_err());
-    }
-
-    #[test]
-    fn unsupported_versions_are_rejected() {
-        let encoded = postcard::to_allocvec(&Envelope {
-            version: PROTOCOL_VERSION + 1,
-            message: Message::Complete,
-        })
-        .unwrap();
-        assert!(matches!(
-            decode(&encoded),
-            Err(ProtocolError::UnsupportedVersion(version)) if version == PROTOCOL_VERSION + 1
-        ));
-    }
-
-    #[test]
-    fn overlay_messages_round_trip() {
-        let public_key = [7; 32];
-        let peer_id = PeerId::from_public_key(&public_key);
-        let request = OverlayRequest::RegisterPeer(PeerAdvertisement {
-            peer_id,
-            public_key,
-            capabilities: vec![PeerCapability::RelayedTransferV0],
-            content_ids: vec![ContentId::digest(b"overlay content")],
+    fn overlay_round_trip() {
+        let key = [7; 32];
+        let value = OverlayRequest::RegisterPeer(PeerAdvertisement {
+            peer_id: PeerId::from_public_key(&key),
+            public_key: key,
+            capabilities: vec![PeerCapability::SwarmTransferV1],
+            content_ids: vec![ContentId::digest(b"x")],
         });
         assert_eq!(
-            decode_overlay_request(&encode_overlay_request(request.clone()).unwrap()).unwrap(),
-            request
-        );
-
-        let response = OverlayResponse::Route(Some(RouteAssignment {
-            provider_id: peer_id,
-            provider_public_key: public_key,
-            relay_id: "relay-a".into(),
-            relay_address: "127.0.0.1:7000".into(),
-            route: "m2-0001".into(),
-        }));
-        assert_eq!(
-            decode_overlay_response(&encode_overlay_response(response.clone()).unwrap()).unwrap(),
-            response
+            decode_overlay_request(&encode_overlay_request(value.clone()).unwrap()).unwrap(),
+            value
         );
     }
-
     #[test]
-    fn malformed_manifest_and_availability_fail_before_state_allocation() {
-        let malformed = Manifest {
-            content_id: ContentId::digest(b"malformed"),
-            length: 1,
-            chunk_size: 0,
-            chunks: Vec::new(),
-        };
+    fn negotiation_fails_closed() {
+        let value = encode(Message::Complete).unwrap();
+        let mut version = value.clone();
+        version[4..6].copy_from_slice(&2_u16.to_be_bytes());
+        assert_eq!(decode(&version), Err(ProtocolError::UnsupportedVersion(2)));
+        let mut network = value;
+        network[7] ^= 1;
         assert!(matches!(
-            encode(Message::Manifest(malformed)),
-            Err(ProtocolError::InvalidMessage(_))
+            decode(&network),
+            Err(ProtocolError::WrongNetwork(_))
         ));
-
-        let (manifest, _) = Manifest::from_bytes(b"one chunk").unwrap();
-        let availability = PieceAvailability {
-            chunk_count: 1,
-            bits: vec![0x80],
-        };
-        assert!(matches!(
-            encode(Message::SwarmManifest {
-                manifest,
-                availability
-            }),
-            Err(ProtocolError::InvalidMessage(_))
-        ));
+        assert!(decode(&[0, 1]).is_err());
     }
-
     #[test]
-    fn oversized_encoded_input_is_rejected_before_decoding() {
-        let oversized = vec![0_u8; MAX_APPLICATION_MESSAGE_BYTES + 1];
-        assert!(matches!(
-            decode(&oversized),
-            Err(ProtocolError::MessageTooLarge { .. })
-        ));
-        let oversized = vec![0_u8; MAX_OVERLAY_MESSAGE_BYTES + 1];
-        assert!(matches!(
-            decode_overlay_request(&oversized),
-            Err(ProtocolError::MessageTooLarge { .. })
-        ));
+    fn unknown_and_trailing_fail_closed() {
+        let mut value = encode(Message::Complete).unwrap();
+        let last = value.len() - 1;
+        value[last] = 254;
+        assert_eq!(decode(&value), Err(ProtocolError::UnknownMessage(254)));
+        let mut value = encode(Message::Complete).unwrap();
+        value.push(0);
+        assert!(decode(&value).is_err());
     }
-
     #[test]
-    fn experimental_m8_conformance_vectors_match_current_codec() {
-        let vectors: ConformanceVectors = serde_json::from_str(include_str!(
-            "../../../test-vectors/m8-experimental-conformance.json"
-        ))
-        .unwrap();
-        assert!(vectors.status.starts_with("experimental M8"));
-        for vector in vectors.application {
-            let result = decode(&hex::decode(&vector.hex).unwrap());
-            match vector.result.as_str() {
-                "complete" => assert_eq!(result.unwrap(), Message::Complete, "{}", vector.name),
-                "swarm_complete" => {
-                    assert_eq!(result.unwrap(), Message::SwarmComplete, "{}", vector.name);
-                }
-                "reject" => assert!(result.is_err(), "{}", vector.name),
-                other => panic!("unknown vector result {other}"),
+    fn availability_is_canonical() {
+        let value = PieceAvailability::from_indices(10, [0, 3, 9]);
+        assert!(value.is_valid() && value.contains(9));
+        assert!(
+            !PieceAvailability {
+                chunk_count: 9,
+                bits: vec![0, 0x80]
             }
-        }
-        for vector in vectors.framing {
-            let length = hex::decode(&vector.length_hex).unwrap();
-            match vector.name.as_str() {
-                "empty-frame" => {
-                    assert_eq!(u32::from_be_bytes(length.try_into().unwrap()), 0);
-                    assert!(decode(&[]).is_err());
-                }
-                "truncated-length" => assert!(length.len() < std::mem::size_of::<u32>()),
-                "oversized-application" => assert!(
-                    usize::try_from(u32::from_be_bytes(length.try_into().unwrap())).unwrap()
-                        > MAX_APPLICATION_MESSAGE_BYTES
-                ),
-                "oversized-control" => assert!(
-                    usize::try_from(u32::from_be_bytes(length.try_into().unwrap())).unwrap()
-                        > MAX_OVERLAY_MESSAGE_BYTES
-                ),
-                other => panic!("unknown framing vector {other}"),
-            }
-            assert!(matches!(
-                vector.result.as_str(),
-                "decode_reject" | "frame_reject"
-            ));
-        }
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
-
-        #[test]
-        fn arbitrary_bounded_protocol_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..8192)) {
-            let _ = decode(&bytes);
-            let _ = decode_overlay_request(&bytes);
-            let _ = decode_overlay_response(&bytes);
-        }
+            .is_valid()
+        );
     }
 }

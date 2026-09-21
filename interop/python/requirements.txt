@@ -1,0 +1,2 @@
+blake3==1.0.8
+noiseprotocol==0.3.1

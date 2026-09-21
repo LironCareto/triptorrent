@@ -1,0 +1,20 @@
+[Unit]
+Description=TripTorrent Testnet v1 bootstrap
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=triptorrent
+Group=triptorrent
+ExecStart=/usr/local/bin/triptorrent bootstrap --listen 0.0.0.0:7100 --lease-ms 30000
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=256M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

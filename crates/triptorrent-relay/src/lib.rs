@@ -8,8 +8,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+use triptorrent_core::{NETWORK_ID, PROTOCOL_VERSION};
 
-const REGISTRATION_MAGIC: &[u8; 4] = b"TTR0";
+const REGISTRATION_MAGIC: &[u8; 4] = b"TTR1";
 const MAX_FRAME_LENGTH: usize = 1024 * 1024;
 const MAX_ROUTE_LENGTH: usize = 128;
 const DEFAULT_MAX_PENDING_ROUTES: usize = 1_024;
@@ -27,6 +28,12 @@ struct PendingRoute {
     sender: Option<TcpStream>,
     receiver: Option<TcpStream>,
     created: Instant,
+}
+
+struct RegistrationOutcome {
+    pair: Option<(TcpStream, TcpStream)>,
+    pending_routes: usize,
+    expired_routes: usize,
 }
 
 impl PendingRoute {
@@ -67,6 +74,7 @@ struct RelayState {
     pending: HashMap<String, PendingRoute>,
     completed: VecDeque<String>,
     limits: RelayLimits,
+    expired_routes: usize,
 }
 
 impl RelayState {
@@ -75,12 +83,15 @@ impl RelayState {
             pending: HashMap::new(),
             completed: VecDeque::new(),
             limits,
+            expired_routes: 0,
         }
     }
 
     fn prune(&mut self) {
+        let before = self.pending.len();
         self.pending
             .retain(|_, route| route.created.elapsed() < self.limits.pending_timeout);
+        self.expired_routes += before.saturating_sub(self.pending.len());
     }
 
     fn register(
@@ -163,31 +174,73 @@ pub fn serve_with_limits(listener: &TcpListener, limits: RelayLimits) -> io::Res
     for incoming in listener.incoming() {
         let mut stream = incoming?;
         if !try_acquire(&registrations, limits.max_registration_connections) {
+            eprintln!(
+                "TRIPTORRENT_RELAY_METRIC event=connection_rejected reason=registration_limit"
+            );
             continue;
         }
         let state = Arc::clone(&state);
         let active = Arc::clone(&active);
         let registrations = Arc::clone(&registrations);
         thread::spawn(move || {
-            let pair = (|| {
+            let outcome: io::Result<RegistrationOutcome> = (|| {
                 stream.set_read_timeout(Some(Duration::from_secs(10)))?;
                 let (route, role) = read_registration(&mut stream)?;
                 stream.set_read_timeout(None)?;
-                state
+                let mut state = state
                     .lock()
-                    .map_err(|_| io::Error::other("relay state lock poisoned"))?
-                    .register(route, role, stream)
+                    .map_err(|_| io::Error::other("relay state lock poisoned"))?;
+                let pair = state.register(route, role, stream)?;
+                Ok(RegistrationOutcome {
+                    pair,
+                    pending_routes: state.pending.len(),
+                    expired_routes: state.expired_routes,
+                })
             })();
             registrations.fetch_sub(1, Ordering::Relaxed);
-            let Ok(Some((sender, receiver))) = pair else {
-                return;
+            let (sender, receiver) = match outcome {
+                Ok(RegistrationOutcome {
+                    pair: Some(pair),
+                    pending_routes,
+                    expired_routes,
+                }) => {
+                    eprintln!(
+                        "TRIPTORRENT_RELAY_METRIC event=route_paired pending_routes={pending_routes} expired_routes={expired_routes}"
+                    );
+                    pair
+                }
+                Ok(RegistrationOutcome {
+                    pair: None,
+                    pending_routes,
+                    expired_routes,
+                }) => {
+                    eprintln!(
+                        "TRIPTORRENT_RELAY_METRIC event=route_pending pending_routes={pending_routes} expired_routes={expired_routes}"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("TRIPTORRENT_RELAY_METRIC event=registration_rejected error={error}");
+                    return;
+                }
             };
             if !try_acquire(&active, limits.max_active_pairs) {
+                eprintln!(
+                    "TRIPTORRENT_RELAY_METRIC event=connection_rejected reason=active_pair_limit"
+                );
                 return;
             }
+            eprintln!(
+                "TRIPTORRENT_RELAY_METRIC event=forwarding_started active_pairs={}",
+                active.load(Ordering::Relaxed)
+            );
             thread::spawn(move || {
                 let _ = relay_pair(sender, receiver);
                 active.fetch_sub(1, Ordering::Relaxed);
+                eprintln!(
+                    "TRIPTORRENT_RELAY_METRIC event=route_closed active_pairs={}",
+                    active.load(Ordering::Relaxed)
+                );
             });
         });
     }
@@ -249,18 +302,49 @@ fn read_registration(stream: &mut TcpStream) -> io::Result<(String, Role)> {
 }
 
 fn parse_registration(frame: &[u8]) -> io::Result<(String, Role)> {
-    if frame.len() < 6 || &frame[..4] != REGISTRATION_MAGIC {
+    if frame.len() < 10 || &frame[..4] != REGISTRATION_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid relay registration",
         ));
     }
-    let role = match frame[4] {
-        0 => Role::Sender,
-        1 => Role::Receiver,
+    if u16::from_be_bytes([frame[4], frame[5]]) != PROTOCOL_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported relay protocol version",
+        ));
+    }
+    let network_length = usize::from(frame[6]);
+    let network_end = 7_usize
+        .checked_add(network_length)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid network length"))?;
+    if frame.get(7..network_end) != Some(NETWORK_ID.as_bytes()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wrong relay network",
+        ));
+    }
+    let role = match frame.get(network_end).copied() {
+        Some(0) => Role::Sender,
+        Some(1) => Role::Receiver,
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid role")),
     };
-    let route = String::from_utf8(frame[5..].to_vec())
+    let length_start = network_end + 1;
+    let length_bytes = frame
+        .get(length_start..length_start + 2)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing route length"))?;
+    let route_length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+    let route_start = length_start + 2;
+    let route_end = route_start
+        .checked_add(route_length)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid route length"))?;
+    if route_end != frame.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "relay registration length mismatch",
+        ));
+    }
+    let route = String::from_utf8(frame[route_start..route_end].to_vec())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "route is not UTF-8"))?;
     if route.len() > MAX_ROUTE_LENGTH
         || !route
@@ -331,15 +415,27 @@ fn read_frame(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
 mod tests {
     use super::*;
 
+    fn registration(role: u8, route: &str) -> Vec<u8> {
+        let mut value = Vec::new();
+        value.extend_from_slice(REGISTRATION_MAGIC);
+        value.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        value.push(u8::try_from(NETWORK_ID.len()).unwrap());
+        value.extend_from_slice(NETWORK_ID.as_bytes());
+        value.push(role);
+        value.extend_from_slice(&u16::try_from(route.len()).unwrap().to_be_bytes());
+        value.extend_from_slice(route.as_bytes());
+        value
+    }
+
     #[test]
     fn relay_forwards_opaque_frames_without_interpreting_them() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let relay = thread::spawn(move || serve_once(&listener));
         let mut sender = TcpStream::connect(address).unwrap();
-        write_frame(&mut sender, b"TTR0\0opaque-test").unwrap();
+        write_frame(&mut sender, &registration(0, "opaque-test")).unwrap();
         let mut receiver = TcpStream::connect(address).unwrap();
-        write_frame(&mut receiver, b"TTR0\x01opaque-test").unwrap();
+        write_frame(&mut receiver, &registration(1, "opaque-test")).unwrap();
 
         let opaque = b"not a protocol message or plaintext file";
         write_frame(&mut sender, opaque).unwrap();
@@ -351,13 +447,15 @@ mod tests {
 
     #[test]
     fn malformed_registration_and_oversized_frame_fail_closed() {
-        for malformed in [
-            b"bad".as_slice(),
-            b"TTR0\x02route".as_slice(),
-            b"TTR0\0../route".as_slice(),
-        ] {
-            assert!(parse_registration(malformed).is_err());
-        }
+        assert!(parse_registration(b"bad").is_err());
+        assert!(parse_registration(&registration(2, "route")).is_err());
+        assert!(parse_registration(&registration(0, "../route")).is_err());
+        let mut wrong_version = registration(0, "route");
+        wrong_version[5] = PROTOCOL_VERSION.to_be_bytes()[1].wrapping_add(1);
+        assert!(parse_registration(&wrong_version).is_err());
+        let mut wrong_network = registration(0, "route");
+        wrong_network[7] ^= 1;
+        assert!(parse_registration(&wrong_network).is_err());
         let mut encoded = Vec::new();
         encoded.extend_from_slice(&u32::try_from(MAX_FRAME_LENGTH + 1).unwrap().to_be_bytes());
         assert!(read_frame(&mut encoded.as_slice()).is_err());
@@ -372,12 +470,12 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
 
         let mut sender = TcpStream::connect(address).unwrap();
-        write_frame(&mut sender, b"TTR0\0concurrent").unwrap();
+        write_frame(&mut sender, &registration(0, "concurrent")).unwrap();
         let mut receiver = TcpStream::connect(address).unwrap();
         receiver
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        write_frame(&mut receiver, b"TTR0\x01concurrent").unwrap();
+        write_frame(&mut receiver, &registration(1, "concurrent")).unwrap();
         write_frame(&mut sender, b"opaque").unwrap();
         assert_eq!(read_frame(&mut receiver).unwrap().unwrap(), b"opaque");
 
@@ -441,6 +539,14 @@ mod tests {
                 .is_none()
         );
         assert_eq!(state.pending.len(), 1);
+        assert!(
+            state
+                .register("replacement".into(), Role::Sender, loopback_stream())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.expired_routes, 1);
 
         let counter = AtomicUsize::new(0);
         assert!(try_acquire(&counter, 1));

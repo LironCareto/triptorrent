@@ -5,9 +5,10 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 use thiserror::Error;
+use triptorrent_core::{NETWORK_ID, PROTOCOL_VERSION};
 use triptorrent_protocol::{Message, ProtocolError};
 
-const REGISTRATION_MAGIC: &[u8; 4] = b"TTR0";
+const REGISTRATION_MAGIC: &[u8; 4] = b"TTR1";
 const MAX_FRAME_LENGTH: usize = 1024 * 1024;
 const MAX_NOISE_MESSAGE: usize = 65_535;
 const NOISE_PSK_PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
@@ -117,9 +118,17 @@ impl TcpRelayTransport {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(timeout)?;
         stream.set_write_timeout(timeout)?;
-        let mut registration = Vec::with_capacity(5 + route.len());
+        let mut registration = Vec::with_capacity(10 + NETWORK_ID.len() + route.len());
         registration.extend_from_slice(REGISTRATION_MAGIC);
+        registration.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        registration.push(u8::try_from(NETWORK_ID.len()).map_err(|_| NetError::InvalidNetwork)?);
+        registration.extend_from_slice(NETWORK_ID.as_bytes());
         registration.push(role.wire_byte());
+        registration.extend_from_slice(
+            &u16::try_from(route.len())
+                .map_err(|_| NetError::InvalidRoute)?
+                .to_be_bytes(),
+        );
         registration.extend_from_slice(route.as_bytes());
         write_frame(&mut stream, &registration)?;
         Ok(Self { stream })
@@ -322,4 +331,7 @@ pub enum NetError {
     /// A Noise backend returned an unexpected key length.
     #[error("Noise backend returned an invalid key length")]
     InvalidKeyLength,
+    /// The built-in network identifier cannot be represented by the registration format.
+    #[error("invalid built-in network identifier")]
+    InvalidNetwork,
 }

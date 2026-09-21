@@ -1,0 +1,14 @@
+.git
+.env
+target
+fuzz/target
+**/__pycache__
+*.pyc
+triptorrent.toml
+triptorrent-data
+*.db
+*.db-shm
+*.db-wal
+*.log
+received*.txt
+source.txt

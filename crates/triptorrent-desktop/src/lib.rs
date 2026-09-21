@@ -176,6 +176,14 @@ impl DesktopSnapshot {
             );
             let _ = writeln!(text, "Provider workers: {}", diagnostics.provider_workers);
             let _ = writeln!(text, "Known relays: {:?}", diagnostics.known_relays);
+            let _ = writeln!(text, "Wire protocol: {}", diagnostics.wire_protocol_version);
+            let _ = writeln!(text, "Network: {}", diagnostics.network);
+            let _ = writeln!(text, "Discovery profile: {}", diagnostics.discovery_profile);
+            let _ = writeln!(
+                text,
+                "Transfer protocol: {}",
+                diagnostics.active_transfer_protocol
+            );
         }
         let _ = writeln!(text, "Network mode: {}", self.network_privacy.network_mode);
         let _ = writeln!(text, "Discovery: {}", self.network_privacy.discovery);
@@ -950,10 +958,13 @@ impl DesktopApp {
             .striped(true)
             .show(ui, |ui| {
                 ui.strong("Network mode");
-                ui.label("TripTorrent prototype");
+                ui.label("TripTorrent Public Testnet 1");
+                ui.end_row();
+                ui.strong("Protocol");
+                ui.label("Testnet v1");
                 ui.end_row();
                 ui.strong("Discovery");
-                ui.label("M2 bootstrap — temporary and centralized");
+                ui.label("Centralized M2-derived testnet bootstrap");
                 ui.end_row();
                 ui.strong("Data path");
                 ui.label("End-to-end encrypted relayed swarm");
@@ -976,7 +987,7 @@ impl DesktopApp {
                 ui.label(if status.compatibility.m3_private_discovery_implemented {
                     "Implemented"
                 } else {
-                    "Research only"
+                    "Not implemented"
                 });
                 ui.end_row();
                 ui.strong("Anonymity");
@@ -1071,7 +1082,7 @@ mod tests {
     #[test]
     fn structured_network_status_is_truthful() {
         let status = NetworkPrivacyStatus::current_prototype();
-        assert_eq!(status.discovery, "temporary_centralized_m2_bootstrap");
+        assert_eq!(status.discovery, "centralized_m2_derived_testnet_bootstrap");
         assert_eq!(status.data_path, "end_to_end_encrypted_relayed_swarm");
         assert!(!status.direct_peer_connection);
         assert!(!status.compatibility.classic_bittorrent_active);

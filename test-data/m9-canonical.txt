@@ -1,0 +1,4 @@
+TripTorrent Testnet 1 canonical synthetic transfer artifact.
+This file is project-owned test data and carries no third-party content.
+Protocol version: 1
+Network: triptorrent-testnet-1

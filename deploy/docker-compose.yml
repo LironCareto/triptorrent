@@ -1,0 +1,55 @@
+services:
+  bootstrap:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["bootstrap", "--listen", "0.0.0.0:7100", "--lease-ms", "30000"]
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "triptorrent", "testnet", "health", "--bootstrap", "127.0.0.1:7100"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 256M}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  relay:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command:
+      - relay
+      - --listen
+      - 0.0.0.0:7000
+      - --bootstrap
+      - 127.0.0.1:7100
+      - --id
+      - ${TRIPTORRENT_RELAY_ID:-relay-1}
+      - --advertise
+      - ${TRIPTORRENT_PUBLIC_RELAY_ADDRESS:?set a real public IP:port}
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      bootstrap: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "triptorrent", "testnet", "health", "--bootstrap", "127.0.0.1:7100", "--relay", "127.0.0.1:7000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 512M}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
